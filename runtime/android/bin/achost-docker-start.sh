@@ -140,14 +140,29 @@ bind_mount() {
     make_mount_private "$dst"
 }
 
-has_devices_cgroup_mount() {
-    while read -r _mount_src _mount_dst mount_type mount_opts _rest; do
+cgroup_v1_mount_point() {
+    controller="$1"
+    preferred="${2:-}"
+    if [ -n "$preferred" ]; then
+        while read -r _mount_src mount_dst mount_type mount_opts _rest; do
+            [ "$mount_dst" = "$preferred" ] || continue
+            [ "$mount_type" = "cgroup" ] || continue
+            case ",$mount_opts," in
+                *,"$controller",*) printf '%s\n' "$mount_dst"; return 0 ;;
+            esac
+        done < /proc/mounts
+    fi
+    while read -r _mount_src mount_dst mount_type mount_opts _rest; do
         [ "$mount_type" = "cgroup" ] || continue
         case ",$mount_opts," in
-            *,devices,*) return 0 ;;
+            *,"$controller",*) printf '%s\n' "$mount_dst"; return 0 ;;
         esac
     done < /proc/mounts
     return 1
+}
+
+has_devices_cgroup_mount() {
+    cgroup_v1_mount_point devices >/dev/null
 }
 
 cgroup_controller_available() {
@@ -168,6 +183,33 @@ setup_devices_cgroup() {
     mkdir -p /dev/achost-cgroup/devices
     mount -t cgroup -o devices none /dev/achost-cgroup/devices 2>/dev/null || \
         printf 'warning: unable to mount devices cgroup\n' >&2
+}
+
+ensure_host_memory_cgroup() {
+    if memory_mount="$(cgroup_v1_mount_point memory /dev/memcg)"; then
+        printf '%s\n' "$memory_mount"
+        return 0
+    fi
+    if ! cgroup_controller_available memory; then
+        printf 'warning: memory cgroup controller unavailable\n' >&2
+        return 1
+    fi
+    if [ -r /sys/fs/cgroup/cgroup.controllers ]; then
+        cgroup2_controllers="$(cat /sys/fs/cgroup/cgroup.controllers 2>/dev/null || true)"
+        case " $cgroup2_controllers " in
+            *' memory '*) printf 'warning: memory still exposed in cgroup2; confirm cgroup_no_v2=memory is active\n' >&2 ;;
+        esac
+    fi
+    mkdir -p /dev/memcg 2>/dev/null || {
+        printf 'warning: unable to create /dev/memcg\n' >&2
+        return 1
+    }
+    if ! mount -t cgroup -o memory none /dev/memcg 2>/dev/null; then
+        printf 'warning: unable to mount memory cgroup at /dev/memcg\n' >&2
+        return 1
+    fi
+    make_mount_private /dev/memcg
+    printf '/dev/memcg\n'
 }
 
 path_state() {
@@ -222,6 +264,23 @@ native_preflight() {
         printf 'devices_cgroup=available-not-mounted\n'
     else
         printf 'devices_cgroup=unavailable\n'
+    fi
+    if memory_mount="$(cgroup_v1_mount_point memory /dev/memcg)"; then
+        printf 'memory_cgroup=mounted path=%s\n' "$memory_mount"
+    elif cgroup_controller_available memory; then
+        printf 'memory_cgroup=available-not-mounted\n'
+    else
+        printf 'memory_cgroup=unavailable\n'
+    fi
+    path_state /dev/memcg
+    path_state /dev/memcg/memory.limit_in_bytes
+    if [ -r /sys/fs/cgroup/cgroup.controllers ]; then
+        cgroup2_controllers="$(cat /sys/fs/cgroup/cgroup.controllers 2>/dev/null || true)"
+        printf 'cgroup2_controllers=%s\n' "$cgroup2_controllers"
+        case " $cgroup2_controllers " in
+            *' memory '*) printf 'cgroup2_memory=present\n' ;;
+            *) printf 'cgroup2_memory=absent\n' ;;
+        esac
     fi
     awk '$3 == "cgroup" || $3 == "cgroup2" { print "cgroup_mount=" $2 ":" $3 ":" $4 }' /proc/mounts 2>/dev/null || true
     cgroup2_root_available && cgroup2_diagnostics /sys/fs/cgroup
@@ -278,11 +337,26 @@ mount_chroot_cgroup() {
     make_mount_private "$dst"
 }
 
+mount_chroot_memory_cgroup_v1() {
+    dst="$ACHOST_CHROOT/sys/fs/cgroup/memory"
+    mkdir -p "$dst" 2>/dev/null || return 0
+    is_mounted "$dst" && return 0
+    if memory_mount="$(ensure_host_memory_cgroup)"; then
+        if mount --bind "$memory_mount" "$dst" 2>/dev/null; then
+            make_mount_private "$dst"
+            return 0
+        fi
+        printf 'warning: unable to bind memory cgroup from %s into chroot\n' "$memory_mount" >&2
+    fi
+    mount_chroot_cgroup memory
+}
+
 setup_chroot_cgroups_v1() {
     mount_virtual_fs tmpfs tmpfs "$ACHOST_CHROOT/sys/fs/cgroup" mode=755,size=1m || return 0
-    for controller in devices pids memory cpu cpuacct cpuset blkio freezer; do
+    for controller in devices pids cpu cpuacct cpuset blkio freezer; do
         mount_chroot_cgroup "$controller"
     done
+    mount_chroot_memory_cgroup_v1
 }
 
 setup_chroot_cgroups_v2() {
@@ -526,6 +600,7 @@ if [ "$ACHOST_USE_CHROOT" = "1" ]; then
     setup_chroot
 else
     setup_devices_cgroup
+    ensure_host_memory_cgroup >/dev/null || true
     native_preflight
 fi
 

@@ -46,7 +46,9 @@ section_file proc_mounts cat /proc/mounts
 shell_file cgroup_mounts 'grep cgroup /proc/mounts 2>/dev/null'
 section_file proc_cgroups cat /proc/cgroups
 shell_file sys_fs_cgroup 'find /sys/fs/cgroup -maxdepth 4 2>/dev/null'
-shell_file dev_cgroup_cpuset "find /dev -maxdepth 3 \( -name '*cgroup*' -o -name '*cpuset*' \) 2>/dev/null"
+shell_file cgroup2_controllers 'cat /sys/fs/cgroup/cgroup.controllers 2>/dev/null; ls -l /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.swap.max 2>/dev/null'
+shell_file dev_cgroup_cpuset_memcg "find /dev -maxdepth 3 \( -name '*cgroup*' -o -name '*cpuset*' -o -name '*memcg*' \) 2>/dev/null"
+shell_file dev_memcg 'find /dev/memcg -maxdepth 2 2>/dev/null; ls -l /dev/memcg/memory.limit_in_bytes /dev/memcg/memory.memsw.limit_in_bytes 2>/dev/null'
 section_file ip_addr ip addr
 section_file ip_route ip route
 section_file ip_rule ip rule

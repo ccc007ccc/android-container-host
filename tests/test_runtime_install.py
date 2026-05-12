@@ -58,6 +58,9 @@ class RuntimeInstallTest(unittest.TestCase):
             docker_start_text = docker_start.read_text()
             self.assertIn("wait_for_bridge", docker_start_text)
             self.assertIn("network reconciled bridge=", docker_start_text)
+            self.assertIn("/dev/memcg", docker_start_text)
+            self.assertIn("ensure_host_memory_cgroup", docker_start_text)
+            self.assertIn("mount_chroot_memory_cgroup_v1", docker_start_text)
             self.assertTrue(docker_smoke.stat().st_mode & stat.S_IXUSR)
             docker_smoke_text = docker_smoke.read_text()
             self.assertIn('DOCKER_SMOKE_MODE="${DOCKER_SMOKE_MODE:-local}"', docker_smoke_text)
@@ -155,6 +158,7 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("ACHOST_CGROUP_MODE=v2", runtime_config)
             self.assertIn("cgroup_mode=", docker_start)
             self.assertIn("setup_chroot_cgroups_v2", docker_start)
+            self.assertIn("mount_chroot_memory_cgroup_v1", docker_start)
 
     def test_refuses_unknown_docker_runtime_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
