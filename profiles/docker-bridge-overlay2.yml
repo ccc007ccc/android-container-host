@@ -1,0 +1,13 @@
+id: docker-bridge-overlay2
+description: Minimal Docker bridge networking and overlay2 storage profile.
+fragments:
+  - common/namespaces.config
+  - common/cgroups-v1.config
+  - common/docker-bridge-net.config
+  - common/docker-overlay2.config
+  - common/android-compat.config
+focus:
+  - docker0 bridge
+  - veth
+  - IPv4 NAT masquerade
+  - overlay2

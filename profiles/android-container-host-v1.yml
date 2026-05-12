@@ -1,0 +1,16 @@
+id: android-container-host-v1
+description: Android 4.19 vendor-kernel container host baseline using cgroup v1 first.
+fragments:
+  - common/namespaces.config
+  - common/cgroups-v1.config
+  - common/lxc-base.config
+  - common/docker-bridge-net.config
+  - common/docker-overlay2.config
+  - common/android-compat.config
+  - kernel-version/linux-4.19.config
+  - device/xiaomi-sm8250-lmi.config
+focus:
+  - docker bridge networking
+  - docker overlay2
+  - privileged LXC baseline
+  - Android cgroup v1 compatibility

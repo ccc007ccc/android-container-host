@@ -1,0 +1,70 @@
+diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
+--- a/kernel/cgroup/cgroup.c
++++ b/kernel/cgroup/cgroup.c
+@@ -1465,6 +1465,23 @@ static char *cgroup_file_name(struct cgroup *cgrp, const struct cftype *cft,
+ 	return buf;
+ }
+
++static bool cgroup_noprefix_compat_name(struct cgroup *cgrp,
++					 const struct cftype *cft, char *buf)
++{
++	if (!(cgrp->root->flags & CGRP_ROOT_NOPREFIX))
++		return false;
++	if (!cft->ss || (cft->flags & CFTYPE_NO_PREFIX))
++		return false;
++	if (!cft->ss->legacy_name || strcmp(cft->ss->legacy_name, "cpuset"))
++		return false;
++	if (strcmp(cft->name, "cpus") && strcmp(cft->name, "mems"))
++		return false;
++
++	snprintf(buf, CGROUP_FILE_NAME_MAX, "%s.%s",
++		 cft->ss->legacy_name, cft->name);
++	return true;
++}
++
+ /**
+  * cgroup_file_mode - deduce file mode of a control file
+  * @cft: the control file in question
+@@ -1608,6 +1625,7 @@ struct cgroup *cgroup_kn_lock_live(struct kernfs_node *kn, bool drain_offline)
+ static void cgroup_rm_file(struct cgroup *cgrp, const struct cftype *cft)
+ {
+ 	char name[CGROUP_FILE_NAME_MAX];
++	char compat_name[CGROUP_FILE_NAME_MAX];
+
+ 	lockdep_assert_held(&cgroup_mutex);
+
+@@ -1622,6 +1640,8 @@ static void cgroup_rm_file(struct cgroup *cgrp, const struct cftype *cft)
+ 		del_timer_sync(&cfile->notify_timer);
+ 	}
+
++	if (cgroup_noprefix_compat_name(cgrp, cft, compat_name))
++		kernfs_remove_by_name(cgrp->kn, compat_name);
+ 	kernfs_remove_by_name(cgrp->kn, cgroup_file_name(cgrp, cft, name));
+ }
+
+@@ -3894,7 +3914,9 @@ static int cgroup_add_file(struct cgroup_subsys_state *css, struct cgroup *cgrp,
+ 			   struct cftype *cft)
+ {
+ 	char name[CGROUP_FILE_NAME_MAX];
++	char compat_name[CGROUP_FILE_NAME_MAX];
+ 	struct kernfs_node *kn;
++	struct kernfs_node *compat_kn;
+ 	struct lock_class_key *key = NULL;
+ 	int ret;
+
+@@ -3915,6 +3937,15 @@ static int cgroup_add_file(struct cgroup_subsys_state *css, struct cgroup *cgrp,
+ 		return ret;
+ 	}
+
++	if (cgroup_noprefix_compat_name(cgrp, cft, compat_name)) {
++		compat_kn = kernfs_create_link(cgrp->kn, compat_name, kn);
++		if (IS_ERR(compat_kn)) {
++			ret = PTR_ERR(compat_kn);
++			kernfs_remove(kn);
++			return ret;
++		}
++	}
++
+ 	if (cft->file_offset) {
+ 		struct cgroup_file *cfile = (void *)css + cft->file_offset;
+

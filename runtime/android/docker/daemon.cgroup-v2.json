@@ -1,0 +1,27 @@
+{
+  "exec-opts": ["native.cgroupdriver=cgroupfs"],
+  "storage-driver": "overlay2",
+  "iptables": false,
+  "ip6tables": false,
+  "ip-forward": true,
+  "ip-masq": false,
+  "dns": ["1.1.1.1", "8.8.8.8"],
+  "dns-opts": ["use-vc"],
+  "bip": "172.31.0.1/16",
+  "default-address-pools": [
+    {
+      "base": "172.30.0.0/16",
+      "size": 24
+    }
+  ],
+  "default-runtime": "runc-nopivot",
+  "runtimes": {
+    "runc-nopivot": {
+      "runtimeType": "io.containerd.runc.v2",
+      "options": {
+        "BinaryName": "@ACHOST_PREFIX@/bin/runc"
+      }
+    }
+  },
+  "log-level": "debug"
+}

@@ -1,0 +1,153 @@
+menu "Android Container Host Support"
+
+config ANDROID_CONTAINER_HOST
+	bool "Android container host support"
+	default n
+	help
+	  Enable grouped kernel capabilities needed to run Docker, containerd,
+	  runc and LXC directly on Android vendor kernels.
+
+config ANDROID_CONTAINER_LXC
+	bool "LXC container support"
+	depends on ANDROID_CONTAINER_HOST
+	imply NAMESPACES
+	imply UTS_NS
+	imply IPC_NS
+	imply PID_NS
+	imply NET_NS
+	imply USER_NS
+	imply CGROUPS
+	imply CGROUP_DEVICE
+	imply CGROUP_PIDS
+	imply CGROUP_FREEZER
+	imply CGROUP_CPUACCT
+	imply CGROUP_SCHED
+	imply CPUSETS
+	imply MEMCG
+	imply POSIX_MQUEUE
+	imply FHANDLE
+	imply SECCOMP
+	imply SECCOMP_FILTER
+	imply DEVPTS_MULTIPLE_INSTANCES
+	imply KEYS
+	help
+	  Group the kernel primitives expected by privileged LXC system
+	  containers while still leaving dependency resolution to Kconfig.
+
+config ANDROID_CONTAINER_LXC_UNPRIVILEGED
+	bool "LXC unprivileged container support"
+	depends on ANDROID_CONTAINER_LXC
+	imply USER_NS
+	imply UIDGID_STRICT_TYPE_CHECKS
+	help
+	  Enable kernel-side pieces useful for unprivileged LXC. Android
+	  userspace still needs uid/gid mapping helpers or an equivalent setup.
+
+config ANDROID_CONTAINER_DOCKER
+	bool "Docker/containerd/runc support"
+	depends on ANDROID_CONTAINER_HOST
+	imply NAMESPACES
+	imply UTS_NS
+	imply IPC_NS
+	imply PID_NS
+	imply NET_NS
+	imply CGROUPS
+	imply CGROUP_DEVICE
+	imply CGROUP_PIDS
+	imply CGROUP_FREEZER
+	imply CGROUP_CPUACCT
+	imply CGROUP_SCHED
+	imply MEMCG
+	imply POSIX_MQUEUE
+	imply FHANDLE
+	imply SECCOMP
+	imply SECCOMP_FILTER
+	imply CHECKPOINT_RESTORE
+	imply KEYS
+	help
+	  Group the core namespace, cgroup and syscall-filtering primitives
+	  expected by Docker Engine, containerd and runc.
+
+config ANDROID_CONTAINER_DOCKER_BRIDGE
+	bool "Docker bridge/NAT networking"
+	depends on ANDROID_CONTAINER_DOCKER
+	imply VETH
+	imply BRIDGE
+	imply BRIDGE_NETFILTER
+	imply NETFILTER
+	imply NETFILTER_XTABLES
+	imply NF_CONNTRACK
+	imply NF_NAT
+	imply IP_NF_IPTABLES
+	imply IP_NF_FILTER
+	imply IP_NF_MANGLE
+	imply IP_NF_NAT
+	imply IP_NF_TARGET_MASQUERADE
+	imply NETFILTER_XT_MATCH_ADDRTYPE
+	imply NETFILTER_XT_MATCH_CONNTRACK
+	imply NETFILTER_XT_MATCH_CGROUP
+	imply NETFILTER_XT_MATCH_MULTIPORT
+	imply NETFILTER_XT_TARGET_CHECKSUM
+	imply NETFILTER_XT_TARGET_MARK
+	imply NETFILTER_XT_MATCH_MARK
+	imply DUMMY
+	imply TUN
+	imply MACVLAN
+	imply IPVLAN
+	imply VXLAN
+	help
+	  Enable the bridge, veth, iptables and NAT pieces needed by Docker's
+	  default bridge network on Android kernels.
+
+config ANDROID_CONTAINER_OVERLAY2
+	bool "Docker overlay2 storage support"
+	depends on ANDROID_CONTAINER_DOCKER
+	imply OVERLAY_FS
+	imply EXT4_FS_POSIX_ACL
+	imply EXT4_FS_SECURITY
+	imply TMPFS
+	imply TMPFS_XATTR
+	imply TMPFS_POSIX_ACL
+	help
+	  Enable filesystem features required by Docker overlay2 without
+	  selecting high-risk storage backends such as AUFS or Btrfs.
+
+config ANDROID_CONTAINER_CGROUP_V1
+	bool "Prefer cgroup v1 layout"
+	depends on ANDROID_CONTAINER_HOST
+	imply CGROUPS
+	help
+	  Prefer cgroupfs and cgroup v1 runtime behavior, which is the initial
+	  default for Android 4.9, 4.14 and 4.19 vendor kernels.
+
+config ANDROID_CONTAINER_CGROUP_V2
+	bool "Enable cgroup v2 support"
+	depends on ANDROID_CONTAINER_HOST
+	imply CGROUPS
+	imply CGROUP_BPF
+	help
+	  Expose cgroup v2 as an explicit advanced choice for kernels and
+	  userspace stacks that can validate Docker and LXC on unified cgroups.
+
+config ANDROID_CONTAINER_ANDROID_NET_COMPAT
+	bool "Android network compatibility helpers"
+	depends on ANDROID_CONTAINER_HOST
+	imply CGROUP_BPF
+	imply BPF
+	imply BPF_SYSCALL
+	imply NETFILTER_XT_MATCH_BPF
+	imply INET_UDP_DIAG
+	help
+	  Group optional Android traffic accounting and eBPF compatibility
+	  pieces so container networking can coexist with Android netd behavior.
+
+config ANDROID_CONTAINER_LMKD_PROTECTION
+	bool "Container daemon memory-pressure protection"
+	depends on ANDROID_CONTAINER_HOST
+	imply MEMCG
+	imply PSI
+	help
+	  Enable kernel features useful for lmkd/PSI diagnostics and for keeping
+	  dockerd and containerd stable under Android memory pressure.
+
+endmenu
