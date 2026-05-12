@@ -32,6 +32,7 @@ printf 'ACHOST=%s\n' "$ACHOST"
 printf 'ACHOST_BIN=%s\n' "$ACHOST_BIN"
 printf 'ACHOST_CHROOT=%s\n' "$ACHOST_CHROOT"
 printf 'ACHOST_USE_CHROOT=%s\n' "$ACHOST_USE_CHROOT"
+printf 'ACHOST_CGROUP_MODE=%s\n' "$ACHOST_CGROUP_MODE"
 printf 'DOCKER_CONFIG=%s\n' "$DOCKER_CONFIG"
 printf 'DOCKER_HOST=%s\n' "$DOCKER_HOST"
 printf 'CONTAINERD_ADDRESS=%s\n' "$CONTAINERD_ADDRESS"
@@ -63,6 +64,19 @@ else
     printf 'docker_compose_plugin=missing path=%s\n' "$compose_plugin"
 fi
 binary_status docker-compose 0
+
+section "docker buildx plugin"
+buildx_plugin="$DOCKER_CONFIG/cli-plugins/docker-buildx"
+if [ -x "$buildx_plugin" ]; then
+    printf 'docker_buildx_plugin=found path=%s executable=1\n' "$buildx_plugin"
+else
+    printf 'docker_buildx_plugin=missing path=%s\n' "$buildx_plugin"
+fi
+binary_status docker-buildx 0
+
+section "buildkit binaries"
+binary_status buildctl 0
+binary_status buildkitd 0
 
 section "lxc binaries"
 if [ -x "$ACHOST_BIN/achost-lxc-validate.sh" ]; then

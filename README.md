@@ -122,9 +122,11 @@ bin/achost runtime-test \
 
 `runtime-install` never downloads binaries. Docker support is enabled by passing an explicit Android/arm64 Docker static tarball with `--docker-asset`; when `--docker-sha256` is supplied, the package generator verifies it before extracting `docker`, `dockerd`, `containerd`, `containerd-shim-runc-v2`, `ctr`, and `runc` into `achost/bin`. If that same Docker tarball already contains a Compose v2 CLI plugin, the package also exposes it for `docker compose`, but Docker Engine startup does not depend on Compose.
 
-On Android 16/lmi, Docker 29 needs a writable `/run`. `achost-docker-start.sh` starts Docker inside an ACHOST-managed chroot under `/data/adb/achost/var/chroot`, so the system rootfs is not remounted or modified.
+Compose, buildx, and BuildKit are explicit optional assets. Use `--compose-asset` for the Docker Compose v2 plugin, `--buildx-asset` for the Docker buildx plugin, and `--buildkit-asset` for a BuildKit tarball containing `buildctl` and `buildkitd`. Compose/buildx are installed under `achost/etc/docker/cli-plugins/` plus standalone fallbacks in `achost/bin`; BuildKit binaries are installed in `achost/bin`.
 
-`runtime-test.sh` starts Docker, runs validation, and stops Docker afterward. The default Docker smoke mode is local-only: it imports a tiny image from the packaged Docker binary and runs it with `--network none`, so it does not depend on Docker Hub. Use `DOCKER_SMOKE_MODE=local-bridge` to also exercise bridge/veth attachment without external traffic, and use `DOCKER_SMOKE_MODE=full` only when registry access and image pulls are expected to work.
+On Android 16/lmi, Docker 29 needs a writable `/run`. `achost-docker-start.sh` starts Docker inside an ACHOST-managed chroot under `/data/adb/achost/var/chroot`, so the system rootfs is not remounted or modified. `--cgroup-mode v2` also changes the runtime cgroup layout by exposing the host cgroup2 tree in the chroot; test v2 packages under a separate prefix before replacing a stable v1 package.
+
+`runtime-test.sh` starts Docker, runs validation, and stops Docker afterward. The default Docker smoke mode is local-only: it imports a tiny image from the packaged Docker binary and runs it with `--network none`, so it does not depend on Docker Hub. Use `DOCKER_SMOKE_MODE=local-bridge` to also exercise bridge/veth attachment without external traffic, `DOCKER_SMOKE_MODE=publish` to verify real host published-port traffic through `docker-proxy`, and `DOCKER_SMOKE_MODE=full` only when registry access and image pulls are expected to work.
 
 On-device helpers installed under `/data/adb/achost/bin`:
 

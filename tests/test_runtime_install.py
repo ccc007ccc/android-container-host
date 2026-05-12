@@ -10,7 +10,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from achost.runtime_install import COMPOSE_PLUGIN_REL, COMPOSE_STANDALONE_REL, DOCKER_REQUIRED_BINARIES, generate_runtime_package
+from achost.runtime_install import (
+    BUILDKIT_REQUIRED_BINARIES,
+    BUILDX_PLUGIN_REL,
+    BUILDX_STANDALONE_REL,
+    COMPOSE_PLUGIN_REL,
+    COMPOSE_STANDALONE_REL,
+    DOCKER_REQUIRED_BINARIES,
+    generate_runtime_package,
+)
 
 
 class RuntimeInstallTest(unittest.TestCase):
@@ -63,6 +71,7 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertFalse((output / "system" / "bin" / "docker").exists())
             self.assertIn("ACHOST_RUNTIME_MODE=chroot", runtime_config.read_text())
             self.assertIn("ACHOST_USE_CHROOT=1", runtime_config.read_text())
+            self.assertIn("ACHOST_CGROUP_MODE=v1", runtime_config.read_text())
             docker_daemon = json.loads(docker_config.read_text())
             self.assertIn("native.cgroupdriver=cgroupfs", docker_daemon["exec-opts"])
             self.assertFalse(docker_daemon["iptables"])
@@ -126,11 +135,26 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertEqual(manifest["docker_runtime_mode"], "native")
             self.assertIn("ACHOST_RUNTIME_MODE=native", runtime_config)
             self.assertIn("ACHOST_USE_CHROOT=0", runtime_config)
+            self.assertIn("ACHOST_CGROUP_MODE=v1", runtime_config)
             self.assertIn("runtime_mode=", docker_start)
             self.assertIn("native_preflight", docker_start)
             self.assertIn("ACHOST_RUNTIME_CONF", env)
             self.assertIn("ACHOST_BIND_PATHS", env)
             self.assertIn("bind_chroot_path \"$bind_path\"", docker_start)
+
+    def test_cgroup_v2_mode_writes_runtime_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "manual"
+            report = generate_runtime_package(output, cgroup_mode="v2")
+            manifest = json.loads((output / "manifest.json").read_text())
+            runtime_config = (output / "achost" / "etc" / "achost-runtime.conf").read_text()
+            docker_start = (output / "achost" / "bin" / "achost-docker-start.sh").read_text()
+
+            self.assertEqual(report["cgroup_mode"], "v2")
+            self.assertEqual(manifest["cgroup_mode"], "v2")
+            self.assertIn("ACHOST_CGROUP_MODE=v2", runtime_config)
+            self.assertIn("cgroup_mode=", docker_start)
+            self.assertIn("setup_chroot_cgroups_v2", docker_start)
 
     def test_refuses_unknown_docker_runtime_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -175,6 +199,78 @@ class RuntimeInstallTest(unittest.TestCase):
             compose_entries = [item for item in manifest["files"] if item.get("asset") == "compose"]
             self.assertEqual({item["path"] for item in compose_entries}, {COMPOSE_PLUGIN_REL, COMPOSE_STANDALONE_REL})
 
+    def test_explicit_compose_asset_installs_plugin_and_overrides_embedded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            docker_asset = tmp_path / "docker-static-aarch64.tgz"
+            compose_asset = tmp_path / "docker-compose-linux-aarch64"
+            self.write_docker_asset(docker_asset, include_compose=True)
+            self.write_single_binary(compose_asset, "explicit compose")
+            output = tmp_path / "manual"
+
+            report = generate_runtime_package(output, docker_asset=docker_asset, compose_asset=compose_asset)
+            manifest = json.loads((output / "manifest.json").read_text())
+
+            self.assertIsNone(report["assets"]["compose"]["member"])
+            self.assertEqual(manifest["assets"]["compose"]["source"], str(compose_asset.resolve()))
+            for rel_path in (COMPOSE_PLUGIN_REL, COMPOSE_STANDALONE_REL):
+                compose = output / rel_path
+                self.assertTrue(compose.exists(), rel_path)
+                self.assertTrue(compose.stat().st_mode & stat.S_IXUSR, rel_path)
+                self.assertIn("explicit compose", compose.read_text())
+
+    def test_buildx_asset_installs_plugin_and_standalone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            asset = tmp_path / "buildx-v0.test.linux-arm64"
+            self.write_single_binary(asset, "buildx test")
+            digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+            output = tmp_path / "manual"
+
+            report = generate_runtime_package(output, buildx_asset=asset, buildx_sha256=digest)
+            manifest = json.loads((output / "manifest.json").read_text())
+
+            self.assertEqual(report["assets"]["buildx"]["sha256"], digest)
+            self.assertEqual(manifest["assets"]["buildx"]["sha256"], digest)
+            for rel_path in (BUILDX_PLUGIN_REL, BUILDX_STANDALONE_REL):
+                buildx = output / rel_path
+                self.assertTrue(buildx.exists(), rel_path)
+                self.assertTrue(buildx.stat().st_mode & stat.S_IXUSR, rel_path)
+
+    def test_buildkit_asset_extracts_required_binaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            asset = tmp_path / "buildkit-linux-arm64.tar.gz"
+            self.write_buildkit_asset(asset)
+            output = tmp_path / "manual"
+
+            report = generate_runtime_package(output, buildkit_asset=asset)
+            manifest = json.loads((output / "manifest.json").read_text())
+
+            self.assertEqual(set(report["assets"]["buildkit"]["files"]), set(BUILDKIT_REQUIRED_BINARIES))
+            self.assertEqual(set(manifest["assets"]["buildkit"]["files"]), set(BUILDKIT_REQUIRED_BINARIES))
+            for name in BUILDKIT_REQUIRED_BINARIES:
+                binary = output / "achost" / "bin" / name
+                self.assertTrue(binary.exists(), name)
+                self.assertTrue(binary.stat().st_mode & stat.S_IXUSR, name)
+
+    def test_refuses_new_asset_checksum_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            asset = Path(tmp) / "buildx"
+            self.write_single_binary(asset, "buildx test")
+
+            with self.assertRaisesRegex(ValueError, "sha256 mismatch"):
+                generate_runtime_package(Path(tmp) / "manual", buildx_asset=asset, buildx_sha256="0" * 64)
+
+    def test_refuses_buildkit_asset_missing_required_binary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            asset = tmp_path / "buildkit-linux-arm64.tar.gz"
+            self.write_buildkit_asset(asset, names=("buildctl",))
+
+            with self.assertRaisesRegex(ValueError, "buildkit asset missing required binaries"):
+                generate_runtime_package(tmp_path / "manual", buildkit_asset=asset)
+
     def test_refuses_missing_docker_asset(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(FileNotFoundError):
@@ -218,6 +314,19 @@ class RuntimeInstallTest(unittest.TestCase):
             if include_compose:
                 data = b"#!/system/bin/sh\nprintf 'docker compose test plugin\\n'\n"
                 info = tarfile.TarInfo("docker/cli-plugins/docker-compose")
+                info.size = len(data)
+                info.mode = 0o755
+                archive.addfile(info, io.BytesIO(data))
+
+    def write_single_binary(self, path: Path, label: str):
+        path.write_text(f"#!/system/bin/sh\nprintf '{label}\\n'\n")
+        path.chmod(0o755)
+
+    def write_buildkit_asset(self, path: Path, names=BUILDKIT_REQUIRED_BINARIES):
+        with tarfile.open(path, "w:gz") as archive:
+            for name in names:
+                data = f"#!/system/bin/sh\nprintf '{name} test binary\\n'\n".encode()
+                info = tarfile.TarInfo(f"bin/{name}")
                 info.size = len(data)
                 info.mode = 0o755
                 archive.addfile(info, io.BytesIO(data))

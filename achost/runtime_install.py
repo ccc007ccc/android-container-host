@@ -44,6 +44,9 @@ DOCKER_OPTIONAL_BINARIES = ("containerd-shim", "docker-init", "docker-proxy", "c
 COMPOSE_ASSET_NAMES = ("docker-compose", "docker-compose-linux-aarch64", "docker-compose-linux-arm64")
 COMPOSE_PLUGIN_REL = "achost/etc/docker/cli-plugins/docker-compose"
 COMPOSE_STANDALONE_REL = "achost/bin/docker-compose"
+BUILDX_PLUGIN_REL = "achost/etc/docker/cli-plugins/docker-buildx"
+BUILDX_STANDALONE_REL = "achost/bin/docker-buildx"
+BUILDKIT_REQUIRED_BINARIES = ("buildctl", "buildkitd")
 SUPERVISOR_SOURCE = RUNTIME_ROOT / "native" / "achost-supervise.c"
 SUPERVISOR_DEST = "achost/bin/achost-supervise"
 LXC_ALLOWED_ROOTS = ("bin", "lib", "lib64", "share")
@@ -63,6 +66,12 @@ def generate_runtime_package(
     cgroup_mode: str = "v1",
     docker_asset: str | Path | None = None,
     docker_sha256: str | None = None,
+    compose_asset: str | Path | None = None,
+    compose_sha256: str | None = None,
+    buildx_asset: str | Path | None = None,
+    buildx_sha256: str | None = None,
+    buildkit_asset: str | Path | None = None,
+    buildkit_sha256: str | None = None,
     lxc_asset: str | Path | None = None,
     lxc_sha256: str | None = None,
     start_docker_on_boot: bool = False,
@@ -76,6 +85,12 @@ def generate_runtime_package(
         raise ValueError(f"unsupported docker runtime mode: {docker_runtime_mode}")
     if docker_sha256 and docker_asset is None:
         raise ValueError("docker checksum requires a docker asset")
+    if compose_sha256 and compose_asset is None:
+        raise ValueError("compose checksum requires a compose asset")
+    if buildx_sha256 and buildx_asset is None:
+        raise ValueError("buildx checksum requires a buildx asset")
+    if buildkit_sha256 and buildkit_asset is None:
+        raise ValueError("buildkit checksum requires a buildkit asset")
     if lxc_sha256 and lxc_asset is None:
         raise ValueError("lxc checksum requires an lxc asset")
     if start_docker_on_boot and mode != "kernelsu-module":
@@ -99,7 +114,7 @@ def generate_runtime_package(
             root,
         )
     )
-    files.append(write_runtime_config(root, docker_runtime_mode))
+    files.append(write_runtime_config(root, docker_runtime_mode, cgroup_mode))
     files.append(
         copy_text_file(
             RUNTIME_ROOT / "sysctl" / "99-container-host.conf",
@@ -124,6 +139,8 @@ def generate_runtime_package(
     assets: dict[str, Any] = {
         "docker": None,
         "compose": None,
+        "buildx": None,
+        "buildkit": None,
         "lxc": None,
         "supervisor": supervisor_report,
         "start_docker_on_boot": start_docker_on_boot,
@@ -133,12 +150,25 @@ def generate_runtime_package(
             docker_asset,
             root,
             docker_sha256,
+            include_embedded_compose=compose_asset is None,
         )
         assets["docker"] = docker_report
         files.extend(docker_files)
         if embedded_compose_report is not None:
             assets["compose"] = embedded_compose_report
             files.extend(embedded_compose_files)
+    if compose_asset is not None:
+        compose_report, compose_files = install_compose_asset(compose_asset, root, compose_sha256)
+        assets["compose"] = compose_report
+        files.extend(compose_files)
+    if buildx_asset is not None:
+        buildx_report, buildx_files = install_buildx_asset(buildx_asset, root, buildx_sha256)
+        assets["buildx"] = buildx_report
+        files.extend(buildx_files)
+    if buildkit_asset is not None:
+        buildkit_report, buildkit_files = install_buildkit_asset(buildkit_asset, root, buildkit_sha256)
+        assets["buildkit"] = buildkit_report
+        files.extend(buildkit_files)
     if lxc_asset is not None:
         lxc_report, lxc_files = install_lxc_asset(lxc_asset, root, lxc_sha256)
         assets["lxc"] = lxc_report
@@ -185,13 +215,14 @@ def ensure_runtime_dirs(root: Path) -> None:
         (root / rel_path).mkdir(parents=True, exist_ok=True)
 
 
-def write_runtime_config(root: Path, docker_runtime_mode: str) -> RuntimeFile:
+def write_runtime_config(root: Path, docker_runtime_mode: str, cgroup_mode: str) -> RuntimeFile:
     use_chroot = "0" if docker_runtime_mode == "native" else "1"
     dst = root / "achost" / "etc" / "achost-runtime.conf"
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(
         f"ACHOST_RUNTIME_MODE={docker_runtime_mode}\n"
         f"ACHOST_USE_CHROOT={use_chroot}\n"
+        f"ACHOST_CGROUP_MODE={cgroup_mode}\n"
     )
     return RuntimeFile(str(dst.relative_to(root)), None, False)
 
@@ -434,6 +465,116 @@ def install_compose_tar_member(
     }, files
 
 
+def is_buildx_member(name: str) -> bool:
+    parts = normalized_tar_parts(name)
+    if not parts:
+        return False
+    basename = parts[-1]
+    return basename in ("buildx", "docker-buildx") or basename.startswith("buildx-") or basename.startswith("docker-buildx-")
+
+
+def install_compose_asset(asset: str | Path, root: Path, expected_sha256: str | None) -> tuple[dict[str, Any], list[RuntimeFile]]:
+    return install_cli_plugin_asset(
+        asset,
+        root,
+        expected_sha256,
+        asset_label="compose",
+        plugin_rel=COMPOSE_PLUGIN_REL,
+        standalone_rel=COMPOSE_STANDALONE_REL,
+        tar_member_match=is_compose_member,
+    )
+
+
+def install_buildx_asset(asset: str | Path, root: Path, expected_sha256: str | None) -> tuple[dict[str, Any], list[RuntimeFile]]:
+    return install_cli_plugin_asset(
+        asset,
+        root,
+        expected_sha256,
+        asset_label="buildx",
+        plugin_rel=BUILDX_PLUGIN_REL,
+        standalone_rel=BUILDX_STANDALONE_REL,
+        tar_member_match=is_buildx_member,
+    )
+
+
+def install_cli_plugin_asset(
+    asset: str | Path,
+    root: Path,
+    expected_sha256: str | None,
+    asset_label: str,
+    plugin_rel: str,
+    standalone_rel: str,
+    tar_member_match,
+) -> tuple[dict[str, Any], list[RuntimeFile]]:
+    asset_path = resolve_asset_file(asset)
+    digest = sha256_file(asset_path)
+    verify_sha256(asset_path, digest, expected_sha256)
+
+    files: list[RuntimeFile] = []
+    member_name: str | None = None
+    if tarfile.is_tarfile(asset_path):
+        with tarfile.open(asset_path, "r:*") as archive:
+            chosen: tarfile.TarInfo | None = None
+            for member in archive.getmembers():
+                if not member.isfile() or not tar_member_match(member.name):
+                    continue
+                if chosen is None or "cli-plugins" in member.name or "/bin/" in member.name:
+                    chosen = member
+            if chosen is None:
+                raise ValueError(f"{asset_label} asset contained no supported binary")
+            for rel_path in (plugin_rel, standalone_rel):
+                dst = root / rel_path
+                copy_tar_member(archive, chosen, dst, 0o755)
+                files.append(RuntimeFile(str(dst.relative_to(root)), str(asset_path), True, asset_label))
+            member_name = chosen.name
+    else:
+        for rel_path in (plugin_rel, standalone_rel):
+            dst = root / rel_path
+            copy_file(asset_path, dst, 0o755)
+            files.append(RuntimeFile(str(dst.relative_to(root)), str(asset_path), True, asset_label))
+
+    return {
+        "source": str(asset_path),
+        "sha256": digest,
+        "member": member_name,
+        "plugin_path": plugin_rel,
+        "standalone_path": standalone_rel,
+    }, files
+
+
+def install_buildkit_asset(asset: str | Path, root: Path, expected_sha256: str | None) -> tuple[dict[str, Any], list[RuntimeFile]]:
+    asset_path = resolve_asset_file(asset)
+    digest = sha256_file(asset_path)
+    verify_sha256(asset_path, digest, expected_sha256)
+    if not tarfile.is_tarfile(asset_path):
+        raise ValueError("buildkit asset must be a tar archive containing buildctl and buildkitd")
+
+    files: list[RuntimeFile] = []
+    extracted: dict[str, str] = {}
+    with tarfile.open(asset_path, "r:*") as archive:
+        for member in archive.getmembers():
+            if not member.isfile():
+                continue
+            name = PurePosixPath(member.name).name
+            if name not in BUILDKIT_REQUIRED_BINARIES or name in extracted:
+                continue
+            dst = root / "achost" / "bin" / name
+            copy_tar_member(archive, member, dst, 0o755)
+            extracted[name] = member.name
+            files.append(RuntimeFile(str(dst.relative_to(root)), str(asset_path), True, "buildkit"))
+
+    missing = [name for name in BUILDKIT_REQUIRED_BINARIES if name not in extracted]
+    if missing:
+        raise ValueError(f"buildkit asset missing required binaries: {', '.join(missing)}")
+
+    return {
+        "source": str(asset_path),
+        "sha256": digest,
+        "required_binaries": list(BUILDKIT_REQUIRED_BINARIES),
+        "files": {name: extracted[name] for name in sorted(extracted)},
+    }, files
+
+
 def install_lxc_asset(asset: str | Path, root: Path, expected_sha256: str | None) -> tuple[dict[str, Any], list[RuntimeFile]]:
     asset_path = resolve_asset_file(asset)
     digest = sha256_file(asset_path)
@@ -496,6 +637,12 @@ def copy_tar_member(archive: tarfile.TarFile, member: tarfile.TarInfo, dst: Path
     dst.parent.mkdir(parents=True, exist_ok=True)
     with source, dst.open("wb") as output:
         shutil.copyfileobj(source, output)
+    os.chmod(dst, mode)
+
+
+def copy_file(src: Path, dst: Path, mode: int) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, dst)
     os.chmod(dst, mode)
 
 
@@ -687,7 +834,7 @@ def format_runtime_install_report(report: dict[str, Any]) -> str:
     assets = report.get("assets", {})
     if assets:
         lines.append("assets:")
-        for name in ("docker", "compose", "lxc"):
+        for name in ("docker", "compose", "buildx", "buildkit", "lxc"):
             asset = assets.get(name)
             if asset:
                 lines.append(f"  - {name}: {asset['source']} sha256={asset['sha256']}")

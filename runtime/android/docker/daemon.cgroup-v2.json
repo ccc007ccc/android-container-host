@@ -5,6 +5,8 @@
   "ip6tables": false,
   "ip-forward": true,
   "ip-masq": false,
+  "userland-proxy": true,
+  "userland-proxy-path": "@ACHOST_PREFIX@/bin/docker-proxy",
   "dns": ["1.1.1.1", "8.8.8.8"],
   "dns-opts": ["use-vc"],
   "bip": "172.31.0.1/16",

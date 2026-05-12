@@ -5,6 +5,7 @@ PING_TARGET="${PING_TARGET:-1.1.1.1}"
 DNS_TARGET="${DNS_TARGET:-google.com}"
 PUBLISHED_PORT="${PUBLISHED_PORT:-18080}"
 RUN_PUBLISHED_PORT="${RUN_PUBLISHED_PORT:-1}"
+DOCKER_PUBLISH_IMAGE="${DOCKER_PUBLISH_IMAGE:-nginx:alpine}"
 DOCKER_SMOKE_MODE="${DOCKER_SMOKE_MODE:-local}"
 DOCKER_LOCAL_BRIDGE="${DOCKER_LOCAL_BRIDGE:-0}"
 STAMP="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
@@ -63,7 +64,7 @@ safe_remove_local_path() {
 }
 
 cleanup() {
-    docker rm -f achost-nginx >/dev/null 2>&1 || true
+    docker rm -f achost-nginx achost-publish-test >/dev/null 2>&1 || true
     if [ "$IMPORTED_LOCAL_IMAGE" = "1" ]; then
         docker rmi "$LOCAL_IMAGE" >/dev/null 2>&1 || true
     fi
@@ -119,6 +120,32 @@ run_local_smoke() {
     fi
 }
 
+docker_proxy_running() {
+    { ps -A 2>/dev/null || ps 2>/dev/null; } | grep -q '[d]ocker-proxy'
+}
+
+curl_published_port() {
+    command -v curl >/dev/null 2>&1 || {
+        printf 'curl command not found\n' >&2
+        return 1
+    }
+    i=0
+    while [ "$i" -lt 10 ]; do
+        curl -fsS "http://127.0.0.1:$PUBLISHED_PORT" && return 0
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+run_publish_smoke() {
+    docker rm -f achost-publish-test >/dev/null 2>&1 || true
+    run_required "published port start" docker run -d --name achost-publish-test -p "127.0.0.1:$PUBLISHED_PORT:80" "$DOCKER_PUBLISH_IMAGE" || return 1
+    run_required "published port mapping" docker port achost-publish-test || return 1
+    run_required "published port docker-proxy" docker_proxy_running || return 1
+    run_required "published port curl" curl_published_port
+}
+
 run_full_smoke() {
     run_required "docker hello-world" docker run --rm hello-world
     run_required "busybox uname" docker run --rm busybox uname -a
@@ -131,12 +158,7 @@ run_full_smoke() {
     run_required "volume write" docker run --rm -v /data/local/tmp:/mnt busybox sh -c 'echo ok > /mnt/docker-volume-test && cat /mnt/docker-volume-test'
 
     if [ "$RUN_PUBLISHED_PORT" = "1" ]; then
-        run_required "published port start" docker run -d --name achost-nginx -p "$PUBLISHED_PORT:80" nginx:alpine
-        if command -v curl >/dev/null 2>&1; then
-            run_required "published port curl" curl -fsS "http://127.0.0.1:$PUBLISHED_PORT"
-        else
-            run_optional "published port skipped" sh -c 'echo curl command not found'
-        fi
+        run_publish_smoke
     fi
 }
 
@@ -156,6 +178,15 @@ elif command -v docker-compose >/dev/null 2>&1; then
 else
     run_optional "docker compose skipped" sh -c 'echo compose plugin not found'
 fi
+if docker buildx version >/dev/null 2>&1; then
+    run_optional "docker buildx version" docker buildx version
+elif command -v docker-buildx >/dev/null 2>&1; then
+    run_optional "docker-buildx version" docker-buildx version
+else
+    run_optional "docker buildx skipped" sh -c 'echo buildx plugin not found'
+fi
+command -v buildctl >/dev/null 2>&1 && run_optional "buildctl version" buildctl --version
+command -v buildkitd >/dev/null 2>&1 && run_optional "buildkitd version" buildkitd --version
 run_required "docker info" docker info
 run_required "overlay2 storage driver" sh -c "docker info 2>/dev/null | grep -i 'Storage Driver: overlay2'"
 
@@ -165,6 +196,9 @@ case "$DOCKER_SMOKE_MODE" in
         ;;
     full|pull|network)
         run_full_smoke
+        ;;
+    publish)
+        run_publish_smoke
         ;;
     *)
         printf 'unsupported DOCKER_SMOKE_MODE: %s\n' "$DOCKER_SMOKE_MODE" >&2

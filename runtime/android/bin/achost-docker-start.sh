@@ -183,6 +183,31 @@ path_state() {
     fi
 }
 
+cgroup2_mounted_at() {
+    cgroup2_mount_path="$1"
+    while read -r _mount_src mount_dst mount_type _mount_opts _rest; do
+        [ "$mount_dst" = "$cgroup2_mount_path" ] && [ "$mount_type" = "cgroup2" ] && return 0
+    done < /proc/mounts
+    return 1
+}
+
+cgroup2_root_available() {
+    cgroup2_mounted_at /sys/fs/cgroup
+}
+
+cgroup2_diagnostics() {
+    cgroup2_prefix="$1"
+    printf 'cgroup2_path=%s\n' "$cgroup2_prefix"
+    for cgroup2_file in cgroup.controllers cgroup.subtree_control cgroup.type memory.current memory.max memory.swap.current memory.swap.max memory.oom.group; do
+        if [ -r "$cgroup2_prefix/$cgroup2_file" ]; then
+            printf 'cgroup2_%s=' "$cgroup2_file"
+            cat "$cgroup2_prefix/$cgroup2_file" 2>/dev/null || true
+        else
+            printf 'cgroup2_%s=missing\n' "$cgroup2_file"
+        fi
+    done
+}
+
 native_preflight() {
     printf 'native_path_run=%s\n' "$ACHOST_RUN"
     printf 'native_path_docker_root=%s\n' "$ACHOST_DOCKER_ROOT"
@@ -199,6 +224,7 @@ native_preflight() {
         printf 'devices_cgroup=unavailable\n'
     fi
     awk '$3 == "cgroup" || $3 == "cgroup2" { print "cgroup_mount=" $2 ":" $3 ":" $4 }' /proc/mounts 2>/dev/null || true
+    cgroup2_root_available && cgroup2_diagnostics /sys/fs/cgroup
 }
 
 bind_chroot_path() {
@@ -245,18 +271,43 @@ mount_chroot_cgroup() {
     mkdir -p "$dst" 2>/dev/null || return 0
     if ! is_mounted "$dst"; then
         if ! mount -t cgroup -o "$controller" none "$dst" 2>/dev/null; then
-            [ "$controller" = "devices" ] && printf 'warning: unable to mount devices cgroup in chroot\n' >&2
+            printf 'warning: unable to mount %s cgroup in chroot\n' "$controller" >&2
             return 0
         fi
     fi
     make_mount_private "$dst"
 }
 
-setup_chroot_cgroups() {
+setup_chroot_cgroups_v1() {
     mount_virtual_fs tmpfs tmpfs "$ACHOST_CHROOT/sys/fs/cgroup" mode=755,size=1m || return 0
     for controller in devices pids memory cpu cpuacct cpuset blkio freezer; do
         mount_chroot_cgroup "$controller"
     done
+}
+
+setup_chroot_cgroups_v2() {
+    if ! cgroup2_root_available; then
+        printf 'warning: cgroup mode v2 requested but /sys/fs/cgroup is not cgroup2; falling back to v1 layout\n' >&2
+        setup_chroot_cgroups_v1
+        return 0
+    fi
+    dst="$ACHOST_CHROOT/sys/fs/cgroup"
+    mkdir -p "$dst" 2>/dev/null || return 0
+    if ! is_mounted "$dst"; then
+        mount --rbind /sys/fs/cgroup "$dst" 2>/dev/null || mount --bind /sys/fs/cgroup "$dst" 2>/dev/null || {
+            printf 'warning: unable to bind cgroup2 into chroot; falling back to v1 layout\n' >&2
+            setup_chroot_cgroups_v1
+            return 0
+        }
+    fi
+    cgroup2_diagnostics /sys/fs/cgroup
+}
+
+setup_chroot_cgroups() {
+    case "$ACHOST_CGROUP_MODE" in
+        v2) setup_chroot_cgroups_v2 ;;
+        *) setup_chroot_cgroups_v1 ;;
+    esac
 }
 
 setup_chroot() {
@@ -466,6 +517,7 @@ done
 mkdir -p "$ACHOST_DOCKER_ROOT" "$ACHOST_DOCKER_EXEC_ROOT" "$ACHOST_CONTAINERD_ROOT" "$ACHOST_CONTAINERD_STATE" "$ACHOST_RUN" "$ACHOST_LOG_DIR" "$DOCKER_CONFIG/cli-plugins" "$(dirname -- "$ACHOST_CONTAINERD_CONFIG")"
 printf 'runtime_mode=%s\n' "$ACHOST_RUNTIME_MODE"
 printf 'use_chroot=%s\n' "$ACHOST_USE_CHROOT"
+printf 'cgroup_mode=%s\n' "$ACHOST_CGROUP_MODE"
 printf 'chroot_launch_mode=%s\n' "$ACHOST_CHROOT_LAUNCH_MODE"
 if [ "$ACHOST_USE_SUPERVISOR" = "1" ] && [ ! -x "$ACHOST_SUPERVISE" ]; then
     printf 'warning: achost-supervise missing; daemon descendants may be reparented to Android init\n' >&2

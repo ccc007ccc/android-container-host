@@ -118,6 +118,12 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_install.add_argument("--docker-runtime-mode", choices=("chroot", "native"), default="chroot")
     runtime_install.add_argument("--docker-asset")
     runtime_install.add_argument("--docker-sha256")
+    runtime_install.add_argument("--compose-asset")
+    runtime_install.add_argument("--compose-sha256")
+    runtime_install.add_argument("--buildx-asset")
+    runtime_install.add_argument("--buildx-sha256")
+    runtime_install.add_argument("--buildkit-asset")
+    runtime_install.add_argument("--buildkit-sha256")
     runtime_install.add_argument("--lxc-asset")
     runtime_install.add_argument("--lxc-sha256")
     runtime_install.add_argument("--start-docker-on-boot", action="store_true")
@@ -252,6 +258,12 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         cgroup_mode=args.cgroup_mode,
         docker_asset=args.docker_asset,
         docker_sha256=args.docker_sha256,
+        compose_asset=args.compose_asset,
+        compose_sha256=args.compose_sha256,
+        buildx_asset=args.buildx_asset,
+        buildx_sha256=args.buildx_sha256,
+        buildkit_asset=args.buildkit_asset,
+        buildkit_sha256=args.buildkit_sha256,
         lxc_asset=args.lxc_asset,
         lxc_sha256=args.lxc_sha256,
         start_docker_on_boot=args.start_docker_on_boot,
