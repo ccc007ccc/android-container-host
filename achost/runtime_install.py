@@ -37,7 +37,6 @@ DOCKER_RUNTIME_FILES = (
     (RUNTIME_ROOT / "docker" / "bin" / "achost-docker-start.sh", "achost/bin/achost-docker-start.sh"),
     (RUNTIME_ROOT / "docker" / "bin" / "achost-docker-stop.sh", "achost/bin/achost-docker-stop.sh"),
     (RUNTIME_ROOT / "docker" / "bin" / "achost-webui-api.sh", "achost/bin/achost-webui-api.sh"),
-    (RUNTIME_ROOT / "docker" / "net" / "restore-docker-iptables.sh", "achost/bin/restore-docker-iptables.sh"),
     (SCRIPT_ROOT / "docker" / "runtime-smoke-docker.sh", "achost/bin/runtime-smoke-docker.sh"),
     (SCRIPT_ROOT / "docker" / "runtime-docker-feature-test.sh", "achost/bin/runtime-docker-feature-test.sh"),
 )
@@ -63,6 +62,9 @@ SUPERVISOR_DEST = "achost/bin/achost-supervise"
 WEBUI_API_CRATE = PROJECT_ROOT / "crates" / "achost-webui-api"
 WEBUI_API_TARGET = RUST_ANDROID_TARGET
 WEBUI_API_DEST = "achost/bin/achost-webui-api"
+RUNTIME_CORE_CRATE = PROJECT_ROOT / "crates" / "achost-runtime-core"
+RUNTIME_CORE_TARGET = RUST_ANDROID_TARGET
+RUNTIME_CORE_DEST = "achost/bin/achost-runtime-core"
 WEBUI_DIST = PROJECT_ROOT / "webui" / "dist"
 LXC_ALLOWED_ROOTS = ("bin", "lib", "lib64", "share")
 
@@ -254,6 +256,10 @@ def generate_runtime_package(
 
     files.append(write_runtime_config(root, mode, spec, docker_runtime_mode, cgroup_mode))
     ensure_runtime_dirs(root, spec if mode == "kernelsu-module" else MODULE_SPECS["legacy"])
+    runtime_core_report: dict[str, Any] | None = None
+    if mode == "manual" or spec.include_common:
+        runtime_core_report, runtime_core_files = install_runtime_core_helper(root)
+        files.extend(runtime_core_files)
     supervisor_report: dict[str, Any] | None = None
     if mode == "manual" or spec.include_supervisor:
         supervisor_report, supervisor_files = install_supervisor_helper(root)
@@ -268,6 +274,7 @@ def generate_runtime_package(
         "buildx": None,
         "buildkit": None,
         "lxc": None,
+        "runtime_core": runtime_core_report,
         "supervisor": supervisor_report,
         "webui_api": webui_api_report,
         "start_docker_on_boot": start_docker_on_boot,
@@ -579,6 +586,13 @@ def copy_text_file(
     if executable:
         os.chmod(dst, 0o755)
     return RuntimeFile(str(dst.relative_to(root)), str(src.relative_to(PROJECT_ROOT)), executable, category=category)
+
+
+def install_runtime_core_helper(root: Path) -> tuple[dict[str, Any], list[RuntimeFile]]:
+    return install_rust_runtime_binary(
+        root,
+        RustRuntimeBinary("achost-runtime-core", RUNTIME_CORE_CRATE, RUNTIME_CORE_TARGET, RUNTIME_CORE_DEST, "common"),
+    )
 
 
 def install_supervisor_helper(root: Path) -> tuple[dict[str, Any], list[RuntimeFile]]:

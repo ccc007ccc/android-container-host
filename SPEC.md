@@ -336,7 +336,7 @@ android-container-host/
         container-netd-compat.sh
         container-nat-manager.sh
         detect-uplink.sh
-        restore-docker-iptables.sh
+        container-network-watchdog.sh
 
       memory/
         protect-container-daemons.sh

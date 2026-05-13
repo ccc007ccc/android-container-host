@@ -517,8 +517,13 @@ wait_for_bridge() {
 
 reconcile_network_once() {
     wait_for_bridge "$CONTAINER_BRIDGE" || return 1
-    [ -x "$ACHOST_BIN/restore-docker-iptables.sh" ] || return 0
-    "$ACHOST_BIN/restore-docker-iptables.sh" >/dev/null 2>&1
+    common_bin="${ACHOST_COMMON_BIN:-$ACHOST_BIN}"
+    if [ -x "$common_bin/container-nat-manager.sh" ]; then
+        "$common_bin/container-nat-manager.sh" >/dev/null 2>&1
+        return $?
+    fi
+    [ -x "$ACHOST_BIN/container-nat-manager.sh" ] || return 0
+    "$ACHOST_BIN/container-nat-manager.sh" >/dev/null 2>&1
 }
 
 pick_iptables() {

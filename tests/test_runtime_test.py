@@ -28,7 +28,7 @@ class RuntimeTestPlanTest(unittest.TestCase):
 
         self.assertEqual(report["target"], "docker")
         self.assertIn("/data/adb/modules/achost-runtime/achost/bin/runtime-test.sh", report["command"])
-        self.assertIn("restore-docker-iptables", report["steps"])
+        self.assertIn("container-nat-manager", report["steps"])
         self.assertNotIn("runtime-smoke-lxc", report["steps"])
 
     def test_rejects_relative_android_paths(self):

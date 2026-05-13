@@ -58,7 +58,7 @@ fn write_pid_file(path: &str, pid: pid_t) -> io::Result<()> {
         .create(true)
         .truncate(true)
         .open(path)?;
-    write!(file, "{}\n", pid)?;
+    writeln!(file, "{}", pid)?;
     Ok(())
 }
 

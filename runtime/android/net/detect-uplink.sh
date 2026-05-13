@@ -1,41 +1,27 @@
 #!/system/bin/sh
 set -u
 
-TARGET="${1:-1.1.1.1}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ACHOST="${ACHOST:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}"
+ACHOST_BIN="${ACHOST_BIN:-$SCRIPT_DIR}"
 
-if ! command -v ip >/dev/null 2>&1; then
-    echo "ip command not found" >&2
-    exit 2
+if [ -r "$SCRIPT_DIR/achost-container-env.sh" ]; then
+    . "$SCRIPT_DIR/achost-container-env.sh"
+elif [ -r "$SCRIPT_DIR/../bin/achost-container-env.sh" ]; then
+    . "$SCRIPT_DIR/../bin/achost-container-env.sh"
+elif [ -r "/data/adb/modules/achost-base/achost/bin/achost-container-env.sh" ]; then
+    ACHOST_BASE="${ACHOST_BASE:-/data/adb/modules/achost-base/achost}"
+    . "$ACHOST_BASE/bin/achost-container-env.sh"
 fi
 
-link_is_usable() {
-    dev="$1"
-    link="$(ip link show "$dev" 2>/dev/null || true)"
-    [ -n "$link" ] || return 1
-    case "$link" in
-        *NO-CARRIER*|*"state DOWN"*) return 1 ;;
-    esac
-    return 0
-}
+ACHOST_COMMON="${ACHOST_COMMON:-${ACHOST_BASE:-$ACHOST}}"
+ACHOST_COMMON_BIN="${ACHOST_COMMON_BIN:-$ACHOST_COMMON/bin}"
+ACHOST_RUNTIME_CORE="${ACHOST_RUNTIME_CORE:-$ACHOST_COMMON_BIN/achost-runtime-core}"
 
-route="$(ip route get "$TARGET" 2>/dev/null || true)"
-if [ -z "$route" ]; then
-    echo "failed to resolve uplink for $TARGET" >&2
+if [ ! -x "$ACHOST_RUNTIME_CORE" ]; then
+    printf 'achost-runtime-core not found: %s\n' "$ACHOST_RUNTIME_CORE" >&2
     exit 1
 fi
 
-set -- $route
-while [ "$#" -gt 0 ]; do
-    if [ "$1" = "dev" ] && [ "$#" -ge 2 ]; then
-        if link_is_usable "$2"; then
-            echo "$2"
-            exit 0
-        fi
-        echo "route dev is not usable: $2" >&2
-        exit 1
-    fi
-    shift
-done
-
-echo "no dev field in route: $route" >&2
-exit 1
+export ACHOST ACHOST_BIN ACHOST_COMMON ACHOST_COMMON_BIN
+exec "$ACHOST_RUNTIME_CORE" detect-uplink "$@"

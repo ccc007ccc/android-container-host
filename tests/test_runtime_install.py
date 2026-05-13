@@ -37,6 +37,7 @@ class RuntimeInstallTest(unittest.TestCase):
             docker_start = output / "achost" / "bin" / "achost-docker-start.sh"
             webui_api = output / "achost" / "bin" / "achost-webui-api"
             webui_api_wrapper = output / "achost" / "bin" / "achost-webui-api.sh"
+            runtime_core = output / "achost" / "bin" / "achost-runtime-core"
             docker_config = output / "achost" / "etc" / "docker" / "daemon.json"
             runtime_config = output / "achost" / "etc" / "achost-runtime.conf"
             docker_smoke = output / "achost" / "bin" / "runtime-smoke-docker.sh"
@@ -52,23 +53,32 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertEqual(report["docker_runtime_mode"], "chroot")
             self.assertTrue(nat_script.exists())
             self.assertTrue(nat_script.stat().st_mode & stat.S_IXUSR)
-            nat_text = nat_script.read_text()
-            self.assertIn("ensure_ip_rule \"$RETURN_RULE_PRIORITY\"", nat_text)
-            self.assertIn("lookup main", nat_text)
-            self.assertIn("lookup \"$ensure_policy_uplink\"", nat_text)
-            self.assertIn("host access rule repaired only", nat_text)
+            wrapper_subcommands = {
+                "detect-uplink.sh": "detect-uplink",
+                "container-nat-manager.sh": "net-reconcile",
+                "container-network-watchdog.sh": "net-watchdog",
+                "protect-container-daemons.sh": "protect-daemons",
+            }
+            for wrapper_name, subcommand in wrapper_subcommands.items():
+                wrapper_text = (output / "achost" / "bin" / wrapper_name).read_text()
+                self.assertIn("achost-runtime-core", wrapper_text)
+                self.assertIn(f'exec "$ACHOST_RUNTIME_CORE" {subcommand} "$@"', wrapper_text)
+                self.assertNotIn("ensure_ip_rule", wrapper_text)
             self.assertTrue(watchdog.exists())
             self.assertTrue(watchdog.stat().st_mode & stat.S_IXUSR)
-            self.assertIn("repair: missing ip rule", watchdog.read_text())
             self.assertTrue(validate.exists())
             self.assertTrue(validate.stat().st_mode & stat.S_IXUSR)
             self.assertTrue(docker_start.exists())
             self.assertTrue(docker_start.stat().st_mode & stat.S_IXUSR)
             self.assertTrue(webui_api.exists())
             self.assertTrue(webui_api.stat().st_mode & stat.S_IXUSR)
+            self.assertTrue(runtime_core.exists())
+            self.assertTrue(runtime_core.stat().st_mode & stat.S_IXUSR)
+            self.assertEqual(report["assets"]["runtime_core"]["path"], "achost/bin/achost-runtime-core")
             webui_api_wrapper_text = webui_api_wrapper.read_text()
             self.assertIn('exec "$SCRIPT_DIR/achost-webui-api" "$@"', webui_api_wrapper_text)
             self.assertNotIn("status_json()", webui_api_wrapper_text)
+            self.assertEqual(categories["achost/bin/achost-runtime-core"], "common")
             self.assertEqual(categories["achost/bin/achost-docker-start.sh"], "docker")
             self.assertEqual(categories["achost/bin/achost-webui-api"], "docker")
             self.assertEqual(categories["achost/bin/runtime-docker-feature-test.sh"], "docker")
@@ -176,6 +186,7 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("uninstall.sh", names)
             self.assertIn("webroot/index.html", names)
             self.assertIn("achost/bin/achost-docker-start.sh", names)
+            self.assertIn("achost/bin/achost-runtime-core", names)
             self.assertIn("achost/bin/achost-webui-api", names)
             self.assertFalse(any(name.startswith("system/") and name.endswith("/docker") for name in names))
 
@@ -191,7 +202,9 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertEqual(manifest["requires"], [])
             self.assertEqual(manifest["provides"], ["common"])
             self.assertIn("achost/bin/achost-container-env.sh", paths)
+            self.assertIn("achost/bin/achost-runtime-core", paths)
             self.assertIn("achost/bin/achost-supervise", paths)
+            self.assertEqual(report["assets"]["runtime_core"]["path"], "achost/bin/achost-runtime-core")
             self.assertNotIn("achost/bin/achost-docker-start.sh", paths)
             self.assertNotIn("achost/bin/achost-webui-api", paths)
             self.assertNotIn("achost/bin/achost-lxc-validate.sh", paths)
@@ -225,6 +238,9 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("achost/bin/achost-docker-start.sh", paths)
             self.assertIn("achost/bin/achost-webui-api.sh", paths)
             self.assertIn("achost/bin/achost-webui-api", paths)
+            self.assertNotIn("achost/bin/achost-runtime-core", paths)
+            self.assertNotIn("achost/bin/restore-docker-iptables.sh", paths)
+            self.assertIsNone(report["assets"]["runtime_core"])
             self.assertEqual(report["assets"]["webui_api"]["path"], "achost/bin/achost-webui-api")
             self.assertIn('exec "$SCRIPT_DIR/achost-webui-api" "$@"', webui_api_wrapper_text)
             self.assertNotIn("case \"${1:-}\"", webui_api_wrapper_text)
@@ -318,6 +334,7 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertNotIn("achost/bin/achost-docker-start.sh", paths)
             self.assertNotIn("achost/bin/achost-webui-api.sh", paths)
             self.assertNotIn("achost/bin/achost-webui-api", paths)
+            self.assertNotIn("achost/bin/achost-runtime-core", paths)
             self.assertNotIn("achost/bin/achost-supervise", paths)
             self.assertFalse((output / "system" / "bin" / "docker").exists())
             self.assertFalse((output / "system" / "xbin" / "docker").exists())

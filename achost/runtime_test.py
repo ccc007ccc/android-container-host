@@ -12,7 +12,7 @@ STEPS = {
     "docker": (
         "protect-container-daemons",
         "achost-docker-start",
-        "restore-docker-iptables",
+        "container-nat-manager",
         "runtime-smoke-docker",
         "runtime-net-debug",
         "achost-docker-stop",
@@ -23,7 +23,7 @@ STEPS = {
         "runtime-net-debug",
         "protect-container-daemons",
         "achost-docker-start",
-        "restore-docker-iptables",
+        "container-nat-manager",
         "runtime-smoke-docker",
         "achost-docker-stop",
         "verify-lxc-checkconfig",
