@@ -65,6 +65,9 @@ WEBUI_API_DEST = "achost/bin/achost-webui-api"
 RUNTIME_CORE_CRATE = PROJECT_ROOT / "crates" / "achost-runtime-core"
 RUNTIME_CORE_TARGET = RUST_ANDROID_TARGET
 RUNTIME_CORE_DEST = "achost/bin/achost-runtime-core"
+DOCKER_RUNTIME_CRATE = PROJECT_ROOT / "crates" / "achost-docker-runtime"
+DOCKER_RUNTIME_TARGET = RUST_ANDROID_TARGET
+DOCKER_RUNTIME_DEST = "achost/bin/achost-docker-runtime"
 WEBUI_DIST = PROJECT_ROOT / "webui" / "dist"
 LXC_ALLOWED_ROOTS = ("bin", "lib", "lib64", "share")
 
@@ -264,6 +267,10 @@ def generate_runtime_package(
     if mode == "manual" or spec.include_supervisor:
         supervisor_report, supervisor_files = install_supervisor_helper(root)
         files.extend(supervisor_files)
+    docker_runtime_report: dict[str, Any] | None = None
+    if mode == "manual" or spec.include_docker:
+        docker_runtime_report, docker_runtime_files = install_docker_runtime_helper(root)
+        files.extend(docker_runtime_files)
     webui_api_report: dict[str, Any] | None = None
     if mode == "manual" or spec.include_docker:
         webui_api_report, webui_api_files = install_webui_api_helper(root)
@@ -275,6 +282,7 @@ def generate_runtime_package(
         "buildkit": None,
         "lxc": None,
         "runtime_core": runtime_core_report,
+        "docker_runtime": docker_runtime_report,
         "supervisor": supervisor_report,
         "webui_api": webui_api_report,
         "start_docker_on_boot": start_docker_on_boot,
@@ -592,6 +600,19 @@ def install_runtime_core_helper(root: Path) -> tuple[dict[str, Any], list[Runtim
     return install_rust_runtime_binary(
         root,
         RustRuntimeBinary("achost-runtime-core", RUNTIME_CORE_CRATE, RUNTIME_CORE_TARGET, RUNTIME_CORE_DEST, "common"),
+    )
+
+
+def install_docker_runtime_helper(root: Path) -> tuple[dict[str, Any], list[RuntimeFile]]:
+    return install_rust_runtime_binary(
+        root,
+        RustRuntimeBinary(
+            "achost-docker-runtime",
+            DOCKER_RUNTIME_CRATE,
+            DOCKER_RUNTIME_TARGET,
+            DOCKER_RUNTIME_DEST,
+            "docker",
+        ),
     )
 
 

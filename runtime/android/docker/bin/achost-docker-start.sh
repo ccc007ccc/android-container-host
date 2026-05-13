@@ -28,6 +28,8 @@ require_executable() {
     fi
 }
 
+ACHOST_DOCKER_RUNTIME="${ACHOST_DOCKER_RUNTIME:-$ACHOST_BIN/achost-docker-runtime}"
+
 pid_running() {
     pid_running_file="$1"
     [ -r "$pid_running_file" ] || return 1
@@ -526,51 +528,6 @@ reconcile_network_once() {
     "$ACHOST_BIN/container-nat-manager.sh" >/dev/null 2>&1
 }
 
-pick_iptables() {
-    for cmd in iptables /system/bin/iptables; do
-        if command -v "$cmd" >/dev/null 2>&1; then
-            command -v "$cmd"
-            return 0
-        fi
-    done
-    return 1
-}
-
-remove_iptables_rule() {
-    ipt="$1"
-    table="$2"
-    chain="$3"
-    shift 3
-    if [ "$table" = "filter" ]; then
-        while "$ipt" -C "$chain" "$@" >/dev/null 2>&1; do
-            "$ipt" -D "$chain" "$@" >/dev/null 2>&1 || break
-        done
-    else
-        while "$ipt" -t "$table" -C "$chain" "$@" >/dev/null 2>&1; do
-            "$ipt" -t "$table" -D "$chain" "$@" >/dev/null 2>&1 || break
-        done
-    fi
-}
-
-cleanup_stale_docker_iptables() {
-    ipt="$(pick_iptables 2>/dev/null || true)"
-    [ -n "$ipt" ] || return 0
-
-    for chain in DOCKER-FORWARD DOCKER-BRIDGE DOCKER-CT DOCKER-INTERNAL DOCKER-ISOLATION DOCKER-ISOLATION-STAGE-1 DOCKER-ISOLATION-STAGE-2 DOCKER; do
-        remove_iptables_rule "$ipt" filter FORWARD -j "$chain"
-    done
-    remove_iptables_rule "$ipt" nat PREROUTING -m addrtype --dst-type LOCAL -j DOCKER
-    remove_iptables_rule "$ipt" nat OUTPUT -m addrtype --dst-type LOCAL ! --dst 127.0.0.0/8 -j DOCKER
-    remove_iptables_rule "$ipt" nat OUTPUT -m addrtype --dst-type LOCAL -j DOCKER
-
-    for chain in DOCKER-INTERNAL DOCKER-CT DOCKER-BRIDGE DOCKER-FORWARD DOCKER DOCKER-ISOLATION-STAGE-2 DOCKER-ISOLATION-STAGE-1 DOCKER-ISOLATION; do
-        "$ipt" -F "$chain" >/dev/null 2>&1 || true
-        "$ipt" -X "$chain" >/dev/null 2>&1 || true
-    done
-    "$ipt" -t nat -F DOCKER >/dev/null 2>&1 || true
-    "$ipt" -t nat -X DOCKER >/dev/null 2>&1 || true
-}
-
 write_dockerd_config() {
     dockerd_template="$DOCKER_CONFIG/daemon.json"
     if [ ! -r "$dockerd_template" ]; then
@@ -706,7 +663,7 @@ start_dockerd_managed_containerd() {
     fi
 }
 
-for name in docker dockerd containerd containerd-shim-runc-v2 ctr runc; do
+for name in docker dockerd containerd containerd-shim-runc-v2 ctr runc achost-docker-runtime; do
     require_executable "$name"
 done
 
@@ -764,7 +721,7 @@ if dockerd_running; then
     printf 'dockerd already running pid=%s\n' "$(dockerd_pid_for_display)"
 else
     rm -f "$ACHOST_DOCKERD_PID" "$ACHOST_DOCKERD_LAUNCH_PID" "${DOCKER_HOST#unix://}" "${ACHOST_DOCKER_COMPAT_HOST#unix://}" 2>/dev/null || true
-    cleanup_stale_docker_iptables
+    "$ACHOST_DOCKER_RUNTIME" cleanup-stale-iptables
     if [ "$ACHOST_EXTERNAL_CONTAINERD" = "1" ]; then
         start_dockerd_external_containerd
     else

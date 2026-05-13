@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/achost-supervise", "crates/achost-webui-api", "crates/achost-runtime-core"]
+members = [
+    "crates/achost-supervise",
+    "crates/achost-webui-api",
+    "crates/achost-runtime-core",
+    "crates/achost-docker-runtime",
+]
 resolver = "2"
 
 [workspace.package]
