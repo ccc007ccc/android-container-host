@@ -4,7 +4,15 @@ set -u
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ACHOST="${ACHOST:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}"
 ACHOST_BIN="$SCRIPT_DIR"
-. "$SCRIPT_DIR/achost-container-env.sh"
+if [ -r "$SCRIPT_DIR/achost-container-env.sh" ]; then
+    . "$SCRIPT_DIR/achost-container-env.sh"
+elif [ -r "/data/adb/modules/achost-base/achost/bin/achost-container-env.sh" ]; then
+    ACHOST_BASE="${ACHOST_BASE:-/data/adb/modules/achost-base/achost}"
+    . "$ACHOST_BASE/bin/achost-container-env.sh"
+else
+    printf 'achost-container-env.sh not found\n' >&2
+    exit 1
+fi
 
 if [ "$(id -u 2>/dev/null || echo 1)" != "0" ]; then
     printf 'achost-docker-start requires root\n' >&2
@@ -470,6 +478,9 @@ setup_chroot() {
     setup_chroot_ca_certs
 
     bind_chroot_path "$ACHOST_BIN"
+    if [ "${ACHOST_COMMON_BIN:-$ACHOST_BIN}" != "$ACHOST_BIN" ]; then
+        bind_chroot_path "$ACHOST_COMMON_BIN"
+    fi
     bind_chroot_path "$ACHOST_ETC"
     bind_chroot_path "$ACHOST_RUN"
     bind_chroot_path "$ACHOST_LOG_DIR"
@@ -678,14 +689,15 @@ else
     native_preflight
 fi
 
-if [ -x "$ACHOST_BIN/protect-container-daemons.sh" ]; then
-    "$ACHOST_BIN/protect-container-daemons.sh" >/dev/null 2>&1 || true
+COMMON_BIN="${ACHOST_COMMON_BIN:-$ACHOST_BIN}"
+if [ -x "$COMMON_BIN/protect-container-daemons.sh" ]; then
+    "$COMMON_BIN/protect-container-daemons.sh" >/dev/null 2>&1 || true
 fi
 
-if [ -x "$ACHOST_BIN/container-network-watchdog.sh" ]; then
+if [ -x "$COMMON_BIN/container-network-watchdog.sh" ]; then
     ACHOST_NET_LOG="${ACHOST_NET_LOG:-/data/local/tmp/achost-network-watchdog.log}" \
     ACHOST_NET_PID="${ACHOST_NET_PID:-/data/local/tmp/achost-network-watchdog.pid}" \
-    "$ACHOST_BIN/container-network-watchdog.sh" >/dev/null 2>&1 &
+    "$COMMON_BIN/container-network-watchdog.sh" >/dev/null 2>&1 &
 fi
 
 if [ "$ACHOST_EXTERNAL_CONTAINERD" = "1" ]; then

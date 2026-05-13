@@ -161,13 +161,94 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("achost/bin/achost-docker-start.sh", names)
             self.assertIn("system/bin/docker", names)
 
+    def test_kernelsu_base_module_excludes_feature_payloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "base"
+            report = generate_runtime_package(output, mode="kernelsu-module", module_target="base")
+            manifest = json.loads((output / "manifest.json").read_text())
+            paths = {item["path"] for item in manifest["files"]}
+
+            self.assertEqual(report["module_id"], "achost-base")
+            self.assertEqual(manifest["module_target"], "base")
+            self.assertEqual(manifest["requires"], [])
+            self.assertEqual(manifest["provides"], ["common"])
+            self.assertIn("achost/bin/achost-container-env.sh", paths)
+            self.assertIn("achost/bin/achost-supervise", paths)
+            self.assertNotIn("achost/bin/achost-docker-start.sh", paths)
+            self.assertNotIn("achost/bin/achost-lxc-validate.sh", paths)
+            self.assertFalse((output / "system" / "bin" / "docker").exists())
+            self.assertFalse((output / "webroot" / "index.html").exists())
+            self.assertNotIn("docker", manifest["included_categories"])
+            self.assertNotIn("lxc", manifest["included_categories"])
+            self.assertNotIn("webui", manifest["included_categories"])
+
+    def test_kernelsu_docker_module_depends_on_base_and_excludes_lxc(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "docker"
+            report = generate_runtime_package(output, mode="kernelsu-module", module_target="docker")
+            manifest = json.loads((output / "manifest.json").read_text())
+            webui_config = json.loads((output / "webroot" / "achost-webui-config.json").read_text())
+            paths = {item["path"] for item in manifest["files"]}
+
+            self.assertEqual(report["module_id"], "achost-docker")
+            self.assertEqual(manifest["module_target"], "docker")
+            self.assertEqual(manifest["requires"], ["achost-base"])
+            self.assertEqual(manifest["provides"], ["docker"])
+            self.assertIn("achost/bin/achost-docker-start.sh", paths)
+            self.assertIn("achost/bin/achost-webui-api.sh", paths)
+            self.assertIn("system/bin/docker", paths)
+            self.assertIn("webroot/index.html", paths)
+            self.assertNotIn("achost/bin/achost-container-env.sh", paths)
+            self.assertNotIn("achost/bin/achost-supervise", paths)
+            self.assertNotIn("achost/bin/achost-lxc-validate.sh", paths)
+            self.assertEqual(webui_config["api"], "/data/adb/modules/achost-docker/achost/bin/achost-webui-api.sh")
+            self.assertNotIn("lxc", manifest["included_categories"])
+            self.assertNotIn("supervisor", manifest["included_categories"])
+
+    def test_kernelsu_lxc_module_depends_on_base_and_excludes_docker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "lxc"
+            report = generate_runtime_package(output, mode="kernelsu-module", module_target="lxc")
+            manifest = json.loads((output / "manifest.json").read_text())
+            paths = {item["path"] for item in manifest["files"]}
+
+            self.assertEqual(report["module_id"], "achost-lxc")
+            self.assertEqual(manifest["module_target"], "lxc")
+            self.assertEqual(manifest["requires"], ["achost-base"])
+            self.assertEqual(manifest["provides"], ["lxc"])
+            self.assertIn("achost/bin/achost-lxc-validate.sh", paths)
+            self.assertIn("achost/etc/lxc/default.conf", paths)
+            self.assertNotIn("achost/bin/achost-docker-start.sh", paths)
+            self.assertNotIn("achost/bin/achost-webui-api.sh", paths)
+            self.assertNotIn("achost/bin/achost-supervise", paths)
+            self.assertFalse((output / "system" / "bin" / "docker").exists())
+            self.assertFalse((output / "webroot" / "index.html").exists())
+            self.assertNotIn("docker", manifest["included_categories"])
+            self.assertNotIn("webui", manifest["included_categories"])
+            self.assertNotIn("supervisor", manifest["included_categories"])
+
+    def test_split_module_asset_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "module"
+            with self.assertRaisesRegex(ValueError, "base module target does not accept"):
+                generate_runtime_package(output, mode="kernelsu-module", module_target="base", docker_asset="docker.tgz")
+            with self.assertRaisesRegex(ValueError, "docker module target does not accept"):
+                generate_runtime_package(output, mode="kernelsu-module", module_target="docker", lxc_asset="lxc.tgz")
+            with self.assertRaisesRegex(ValueError, "lxc module target does not accept"):
+                generate_runtime_package(output, mode="kernelsu-module", module_target="lxc", buildx_asset="buildx")
+
     def test_kernelsu_module_can_start_docker_on_boot(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "module"
             generate_runtime_package(output, mode="kernelsu-module", start_docker_on_boot=True)
 
             service = (output / "service.sh").read_text()
+            customize = (output / "customize.sh").read_text()
+            self.assertIn("docker.autostart", service)
             self.assertIn("achost-docker-start.sh", service)
+            self.assertIn("dockerd-start.log", service)
+            self.assertIn("printf '1", service)
+            self.assertIn("docker.autostart", customize)
             self.assertIn("protect-container-daemons.sh", service)
             self.assertIn("container-network-watchdog.sh", service)
 

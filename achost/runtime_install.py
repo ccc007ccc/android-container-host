@@ -14,9 +14,11 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_ROOT = PROJECT_ROOT / "runtime" / "android"
 SCRIPT_ROOT = PROJECT_ROOT / "scripts"
-MODULE_ID = "achost-runtime"
-KERNELSU_DATA_ROOT = "/data/adb/achost-runtime"
+LEGACY_MODULE_ID = "achost-runtime"
+LEGACY_DATA_ROOT = "/data/adb/achost-runtime"
+SPLIT_DATA_ROOT = "/data/adb/achost"
 SUPPORTED_MODES = ("manual", "kernelsu-module")
+SUPPORTED_MODULE_TARGETS = ("legacy", "base", "docker", "lxc")
 SUPPORTED_CGROUP_MODES = ("v1", "v2")
 SUPPORTED_DOCKER_RUNTIME_MODES = ("chroot", "native")
 
@@ -70,6 +72,82 @@ class RuntimeFile:
     category: str = "common"
 
 
+@dataclass(frozen=True)
+class ModuleSpec:
+    target: str
+    module_id: str
+    name: str
+    description: str
+    data_root: str
+    requires: tuple[str, ...]
+    provides: tuple[str, ...]
+    include_common: bool
+    include_docker: bool
+    include_lxc: bool
+    include_webui: bool
+    include_supervisor: bool
+
+
+MODULE_SPECS = {
+    "legacy": ModuleSpec(
+        "legacy",
+        LEGACY_MODULE_ID,
+        "Android Container Host Runtime",
+        "Legacy all-in-one runtime module for Docker/LXC on Android container host kernels.",
+        LEGACY_DATA_ROOT,
+        (),
+        ("common", "docker", "lxc"),
+        True,
+        True,
+        True,
+        True,
+        True,
+    ),
+    "base": ModuleSpec(
+        "base",
+        "achost-base",
+        "Android Container Host Base",
+        "Shared ACHOST runtime, supervisor, sysctl, networking and diagnostics for feature modules.",
+        SPLIT_DATA_ROOT,
+        (),
+        ("common",),
+        True,
+        False,
+        False,
+        False,
+        True,
+    ),
+    "docker": ModuleSpec(
+        "docker",
+        "achost-docker",
+        "Android Container Host Docker",
+        "Docker runtime, command line wrapper and WebUI for ACHOST.",
+        SPLIT_DATA_ROOT,
+        ("achost-base",),
+        ("docker",),
+        False,
+        True,
+        False,
+        True,
+        False,
+    ),
+    "lxc": ModuleSpec(
+        "lxc",
+        "achost-lxc",
+        "Android Container Host LXC",
+        "LXC runtime configs and validation tools for ACHOST.",
+        SPLIT_DATA_ROOT,
+        ("achost-base",),
+        ("lxc",),
+        False,
+        False,
+        True,
+        False,
+        False,
+    ),
+}
+
+
 def generate_runtime_package(
     output: str | Path,
     mode: str = "manual",
@@ -86,9 +164,14 @@ def generate_runtime_package(
     lxc_sha256: str | None = None,
     start_docker_on_boot: bool = False,
     docker_runtime_mode: str = "chroot",
+    module_target: str = "legacy",
 ) -> dict[str, Any]:
     if mode not in SUPPORTED_MODES:
         raise ValueError(f"unsupported runtime package mode: {mode}")
+    if module_target not in SUPPORTED_MODULE_TARGETS:
+        raise ValueError(f"unsupported module target: {module_target}")
+    if mode != "kernelsu-module" and module_target != "legacy":
+        raise ValueError("module targets are only supported for kernelsu-module mode")
     if cgroup_mode not in SUPPORTED_CGROUP_MODES:
         raise ValueError(f"unsupported cgroup mode: {cgroup_mode}")
     if docker_runtime_mode not in SUPPORTED_DOCKER_RUNTIME_MODES:
@@ -106,54 +189,62 @@ def generate_runtime_package(
     if start_docker_on_boot and mode != "kernelsu-module":
         raise ValueError("start_docker_on_boot is only supported for kernelsu-module mode")
 
+    spec = MODULE_SPECS[module_target]
+    validate_assets_for_module(spec, docker_asset, compose_asset, buildx_asset, buildkit_asset, lxc_asset)
+
     root = Path(output).expanduser().resolve()
     ensure_empty_output(root)
     root.mkdir(parents=True, exist_ok=True)
 
-    install_prefix = install_prefix_for_mode(mode)
+    install_prefix = install_prefix_for_mode(mode, spec)
     replacements = {"@ACHOST_PREFIX@": install_prefix}
     files: list[RuntimeFile] = []
 
-    for category, runtime_files in (
-        ("common", COMMON_RUNTIME_FILES),
-        ("docker", DOCKER_RUNTIME_FILES),
-        ("lxc", LXC_RUNTIME_FILES),
-    ):
-        for src, dst in runtime_files:
-            files.append(copy_text_file(src, root / dst, root, executable=True, category=category))
-
-    files.append(
-        copy_text_file(
-            RUNTIME_ROOT / "docker" / "etc" / f"daemon.cgroup-{cgroup_mode}.json",
-            root / "achost" / "etc" / "docker" / "daemon.json",
-            root,
-            category="docker",
-        )
-    )
-    files.append(write_runtime_config(root, mode, docker_runtime_mode, cgroup_mode))
-    files.append(
-        copy_text_file(
-            RUNTIME_ROOT / "sysctl" / "99-container-host.conf",
-            root / "achost" / "etc" / "sysctl.d" / "99-container-host.conf",
-            root,
-            category="common",
-        )
-    )
-    for name in LXC_FILES:
+    if mode == "manual" or spec.include_common:
+        for src, dst in COMMON_RUNTIME_FILES:
+            files.append(copy_text_file(src, root / dst, root, executable=True, category="common"))
         files.append(
             copy_text_file(
-                RUNTIME_ROOT / "lxc" / name,
-                root / "achost" / "etc" / "lxc" / name,
+                RUNTIME_ROOT / "sysctl" / "99-container-host.conf",
+                root / "achost" / "etc" / "sysctl.d" / "99-container-host.conf",
                 root,
-                replacements=replacements,
-                category="lxc",
+                category="common",
             )
         )
 
-    ensure_runtime_dirs(root)
-    files.extend(write_docker_wrappers(root, mode, install_prefix))
-    supervisor_report, supervisor_files = install_supervisor_helper(root)
-    files.extend(supervisor_files)
+    if mode == "manual" or spec.include_docker:
+        for src, dst in DOCKER_RUNTIME_FILES:
+            files.append(copy_text_file(src, root / dst, root, executable=True, category="docker"))
+        files.append(
+            copy_text_file(
+                RUNTIME_ROOT / "docker" / "etc" / f"daemon.cgroup-{cgroup_mode}.json",
+                root / "achost" / "etc" / "docker" / "daemon.json",
+                root,
+                category="docker",
+            )
+        )
+        files.extend(write_docker_wrappers(root, mode, install_prefix, spec))
+
+    if mode == "manual" or spec.include_lxc:
+        for src, dst in LXC_RUNTIME_FILES:
+            files.append(copy_text_file(src, root / dst, root, executable=True, category="lxc"))
+        for name in LXC_FILES:
+            files.append(
+                copy_text_file(
+                    RUNTIME_ROOT / "lxc" / name,
+                    root / "achost" / "etc" / "lxc" / name,
+                    root,
+                    replacements=replacements,
+                    category="lxc",
+                )
+            )
+
+    files.append(write_runtime_config(root, mode, spec, docker_runtime_mode, cgroup_mode))
+    ensure_runtime_dirs(root, spec if mode == "kernelsu-module" else MODULE_SPECS["legacy"])
+    supervisor_report: dict[str, Any] | None = None
+    if mode == "manual" or spec.include_supervisor:
+        supervisor_report, supervisor_files = install_supervisor_helper(root)
+        files.extend(supervisor_files)
     assets: dict[str, Any] = {
         "docker": None,
         "compose": None,
@@ -192,12 +283,21 @@ def generate_runtime_package(
         assets["lxc"] = lxc_report
         files.extend(lxc_files)
 
-    if mode == "kernelsu-module":
-        files.extend(install_webui(root))
-    entrypoints = write_mode_files(root, mode, files, start_docker_on_boot=start_docker_on_boot)
-    files.append(RuntimeFile("manifest.json", None, False))
+    if mode == "kernelsu-module" and spec.include_webui:
+        files.extend(install_webui(root, spec))
+    entrypoints = write_mode_files(root, mode, spec, files, start_docker_on_boot=start_docker_on_boot)
+    files.append(RuntimeFile("manifest.json", None, False, category="module-config"))
+    included_categories = sorted({item.category for item in files})
     report = {
         "mode": mode,
+        "module_target": module_target,
+        "module_id": spec.module_id if mode == "kernelsu-module" else None,
+        "module_name": spec.name if mode == "kernelsu-module" else None,
+        "data_root": spec.data_root if mode == "kernelsu-module" else None,
+        "requires": list(spec.requires) if mode == "kernelsu-module" else [],
+        "provides": list(spec.provides) if mode == "kernelsu-module" else [],
+        "included_categories": included_categories,
+        "excluded_categories": [category for category in ("common", "docker", "lxc", "webui", "supervisor") if category not in included_categories],
         "cgroup_mode": cgroup_mode,
         "docker_runtime_mode": docker_runtime_mode,
         "output": str(root),
@@ -210,9 +310,26 @@ def generate_runtime_package(
     return report
 
 
-def install_prefix_for_mode(mode: str) -> str:
+def validate_assets_for_module(
+    spec: ModuleSpec,
+    docker_asset: str | Path | None,
+    compose_asset: str | Path | None,
+    buildx_asset: str | Path | None,
+    buildkit_asset: str | Path | None,
+    lxc_asset: str | Path | None,
+) -> None:
+    docker_assets = [asset for asset in (docker_asset, compose_asset, buildx_asset, buildkit_asset) if asset is not None]
+    if spec.target == "base" and (docker_assets or lxc_asset is not None):
+        raise ValueError("base module target does not accept Docker or LXC assets")
+    if spec.target == "docker" and lxc_asset is not None:
+        raise ValueError("docker module target does not accept LXC assets")
+    if spec.target == "lxc" and docker_assets:
+        raise ValueError("lxc module target does not accept Docker assets")
+
+
+def install_prefix_for_mode(mode: str, spec: ModuleSpec) -> str:
     if mode == "kernelsu-module":
-        return f"/data/adb/modules/{MODULE_ID}/achost"
+        return f"/data/adb/modules/{spec.module_id}/achost"
     return "/data/adb/achost"
 
 
@@ -223,21 +340,32 @@ def ensure_empty_output(root: Path) -> None:
         raise FileExistsError(f"output directory is not empty: {root}")
 
 
-def ensure_runtime_dirs(root: Path) -> None:
-    for rel_path in (
-        "achost/etc/docker/cli-plugins",
-        "achost/var/docker",
+def ensure_runtime_dirs(root: Path, spec: ModuleSpec) -> None:
+    rel_paths = [
+        "achost/etc",
         "achost/var/run",
         "achost/var/log",
-        "achost/var/containerd/root",
-        "achost/var/containerd/state",
-    ):
+    ]
+    if spec.include_docker:
+        rel_paths.extend(
+            (
+                "achost/etc/docker/cli-plugins",
+                "achost/var/docker",
+                "achost/var/containerd/root",
+                "achost/var/containerd/state",
+                "achost/wrappers",
+            )
+        )
+    if spec.include_lxc:
+        rel_paths.extend(("achost/etc/lxc", "achost/lxc"))
+    for rel_path in rel_paths:
         (root / rel_path).mkdir(parents=True, exist_ok=True)
 
 
-def write_runtime_config(root: Path, mode: str, docker_runtime_mode: str, cgroup_mode: str) -> RuntimeFile:
+def write_runtime_config(root: Path, mode: str, spec: ModuleSpec, docker_runtime_mode: str, cgroup_mode: str) -> RuntimeFile:
     use_chroot = "0" if docker_runtime_mode == "native" else "1"
     lines = [
+        f"ACHOST_MODULE_TARGET={spec.target}",
         f"ACHOST_RUNTIME_MODE={docker_runtime_mode}",
         f"ACHOST_USE_CHROOT={use_chroot}",
         f"ACHOST_CGROUP_MODE={cgroup_mode}",
@@ -245,14 +373,18 @@ def write_runtime_config(root: Path, mode: str, docker_runtime_mode: str, cgroup
     if mode == "kernelsu-module":
         lines.extend(
             (
-                f"ACHOST_VAR={KERNELSU_DATA_ROOT}",
-                f"ACHOST_CHROOT={KERNELSU_DATA_ROOT}/chroot",
+                f"ACHOST_VAR={spec.data_root}",
+                f"ACHOST_CONFIG={spec.data_root}/config",
+                f"ACHOST_CHROOT={spec.data_root}/chroot",
+                "ACHOST_BASE=/data/adb/modules/achost-base/achost",
+                "ACHOST_DOCKER_MODULE=/data/adb/modules/achost-docker/achost",
+                "ACHOST_LXC_MODULE=/data/adb/modules/achost-lxc/achost",
             )
         )
     dst = root / "achost" / "etc" / "achost-runtime.conf"
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text("\n".join(lines) + "\n")
-    return RuntimeFile(str(dst.relative_to(root)), None, False)
+    return RuntimeFile(str(dst.relative_to(root)), None, False, category="module-config")
 
 
 def write_executable_text(root: Path, rel_path: str, text: str, category: str = "common") -> RuntimeFile:
@@ -263,7 +395,7 @@ def write_executable_text(root: Path, rel_path: str, text: str, category: str = 
     return RuntimeFile(str(dst.relative_to(root)), None, True, category=category)
 
 
-def write_docker_wrappers(root: Path, mode: str, install_prefix: str) -> list[RuntimeFile]:
+def write_docker_wrappers(root: Path, mode: str, install_prefix: str, spec: ModuleSpec) -> list[RuntimeFile]:
     files = [
         write_executable_text(
             root,
@@ -277,7 +409,7 @@ def write_docker_wrappers(root: Path, mode: str, install_prefix: str) -> list[Ru
             write_executable_text(
                 root,
                 "system/bin/docker",
-                module_docker_wrapper(install_prefix),
+                module_docker_wrapper(install_prefix, spec),
                 category="docker",
             )
         )
@@ -294,11 +426,23 @@ exec "$ACHOST/bin/docker" "$@"
 '''
 
 
-def module_docker_wrapper(install_prefix: str) -> str:
+def module_docker_wrapper(install_prefix: str, spec: ModuleSpec) -> str:
+    base_source = ""
+    if spec.target == "docker":
+        base_source = '''
+elif [ -r "/data/adb/modules/achost-base/achost/bin/achost-container-env.sh" ]; then
+    ACHOST_BASE="${ACHOST_BASE:-/data/adb/modules/achost-base/achost}"
+    . "$ACHOST_BASE/bin/achost-container-env.sh"
+'''
     return f'''#!/system/bin/sh
 set -u
 ACHOST="${{ACHOST:-{install_prefix}}}"
-. "$ACHOST/bin/achost-container-env.sh"
+if [ -r "$ACHOST/bin/achost-container-env.sh" ]; then
+    . "$ACHOST/bin/achost-container-env.sh"
+{base_source}else
+    printf 'ACHost env not found\n' >&2
+    exit 1
+fi
 exec "$ACHOST/bin/docker" "$@"
 '''
 
@@ -370,7 +514,7 @@ def install_supervisor_helper(root: Path) -> tuple[dict[str, Any], list[RuntimeF
     }, [RuntimeFile(str(dst.relative_to(root)), str(SUPERVISOR_CRATE.relative_to(PROJECT_ROOT)), True, category="supervisor")]
 
 
-def install_webui(root: Path) -> list[RuntimeFile]:
+def install_webui(root: Path, spec: ModuleSpec) -> list[RuntimeFile]:
     index = WEBUI_DIST / "index.html"
     if not index.exists():
         raise FileNotFoundError(f"WebUI dist not found: {WEBUI_DIST}; run npm install && npm run build in webui")
@@ -383,6 +527,15 @@ def install_webui(root: Path) -> list[RuntimeFile]:
         dst = root / "webroot" / rel
         copy_file(src, dst, 0o644)
         files.append(RuntimeFile(str(dst.relative_to(root)), str(src.relative_to(PROJECT_ROOT)), False, category="webui"))
+
+    config = {
+        "moduleTarget": spec.target,
+        "moduleId": spec.module_id,
+        "api": f"/data/adb/modules/{spec.module_id}/achost/bin/achost-webui-api.sh",
+    }
+    dst = root / "webroot" / "achost-webui-config.json"
+    dst.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
+    files.append(RuntimeFile(str(dst.relative_to(root)), None, False, category="webui"))
     return files
 
 
@@ -748,14 +901,20 @@ def strip_lxc_asset_root(parts: list[str]) -> list[str]:
     return parts
 
 
-def write_mode_files(root: Path, mode: str, files: list[RuntimeFile], start_docker_on_boot: bool = False) -> list[str]:
+def write_mode_files(
+    root: Path,
+    mode: str,
+    spec: ModuleSpec,
+    files: list[RuntimeFile],
+    start_docker_on_boot: bool = False,
+) -> list[str]:
     if mode == "kernelsu-module":
         generated = {
-            "module.prop": module_prop(),
+            "module.prop": module_prop(spec),
             "post-fs-data.sh": post_fs_data_script(),
-            "service.sh": service_script(start_docker_on_boot=start_docker_on_boot),
-            "customize.sh": customize_script(),
-            "uninstall.sh": uninstall_script(),
+            "service.sh": service_script(spec, start_docker_on_boot=start_docker_on_boot),
+            "customize.sh": customize_script(spec, start_docker_on_boot=start_docker_on_boot),
+            "uninstall.sh": uninstall_script(spec),
         }
         entrypoints = ["post-fs-data.sh", "service.sh", "customize.sh", "uninstall.sh"]
     else:
@@ -769,7 +928,7 @@ def write_mode_files(root: Path, mode: str, files: list[RuntimeFile], start_dock
         executable = rel_path.endswith(".sh")
         if executable:
             os.chmod(dst, 0o755)
-        files.append(RuntimeFile(rel_path, None, executable))
+        files.append(RuntimeFile(rel_path, None, executable, category="entrypoint"))
     return entrypoints
 
 
@@ -826,13 +985,13 @@ printf 'For plain docker in this shell: export PATH=%s/wrappers:%s/bin:$PATH\n' 
 """
 
 
-def module_prop() -> str:
-    return """id=achost-runtime
-name=Android Container Host Runtime
+def module_prop(spec: ModuleSpec) -> str:
+    return f"""id={spec.module_id}
+name={spec.name}
 version=0.1.0
 versionCode=1
 author=ccc007
-description=Runtime scripts and default configs for Docker/LXC on Android container host kernels.
+description={spec.description}
 """
 
 
@@ -856,46 +1015,73 @@ done < "$CONF"
 """
 
 
-def service_script(start_docker_on_boot: bool = False) -> str:
+def service_script(spec: ModuleSpec, start_docker_on_boot: bool = False) -> str:
+    seed_autostart = "1" if start_docker_on_boot else "0"
+    common_start = ""
+    if spec.include_common:
+        common_start = """
+COMMON_BIN="${ACHOST_COMMON_BIN:-$ACHOST/bin}"
+if [ -x "$COMMON_BIN/protect-container-daemons.sh" ]; then
+    "$COMMON_BIN/protect-container-daemons.sh" >/dev/null 2>&1 || true
+fi
+
+if [ -x "$COMMON_BIN/container-network-watchdog.sh" ]; then
+    "$COMMON_BIN/container-network-watchdog.sh" >/dev/null 2>&1 &
+fi
+"""
     docker_start = ""
-    if start_docker_on_boot:
-        docker_start = """
-if [ -x "$ACHOST/bin/achost-docker-start.sh" ]; then
-    "$ACHOST/bin/achost-docker-start.sh" >/dev/null 2>&1 &
+    if spec.include_docker:
+        docker_start = f"""
+AUTOSTART_FILE="$ACHOST_CONFIG/docker.autostart"
+[ -e "$AUTOSTART_FILE" ] || printf '{seed_autostart}\n' > "$AUTOSTART_FILE" 2>/dev/null || true
+if [ "$(cat "$AUTOSTART_FILE" 2>/dev/null || printf '0')" = "1" ] && [ -x "$ACHOST/bin/achost-docker-start.sh" ]; then
+    "$ACHOST/bin/achost-docker-start.sh" >> "$ACHOST_LOG_DIR/dockerd-start.log" 2>&1 &
 fi
 """
     return f"""#!/system/bin/sh
 MODDIR="${{0%/*}}"
-ACHOST="$MODDIR/achost"
+ACHOST="${{ACHOST:-$MODDIR/achost}}"
+ACHOST_DATA="{spec.data_root}"
 PATH=/system/bin:/system/xbin:/vendor/bin:/product/bin:/data/adb/magisk:$PATH
 
 if [ -r "$ACHOST/bin/achost-container-env.sh" ]; then
     . "$ACHOST/bin/achost-container-env.sh"
+elif [ -r "/data/adb/modules/achost-base/achost/bin/achost-container-env.sh" ]; then
+    ACHOST_BASE="${{ACHOST_BASE:-/data/adb/modules/achost-base/achost}}"
+    . "$ACHOST_BASE/bin/achost-container-env.sh"
 fi
 
-ACHOST_VAR="${{ACHOST_VAR:-{KERNELSU_DATA_ROOT}}}"
+ACHOST_VAR="${{ACHOST_VAR:-$ACHOST_DATA}}"
+ACHOST_CONFIG="${{ACHOST_CONFIG:-$ACHOST_VAR/config}}"
 ACHOST_RUN="${{ACHOST_RUN:-$ACHOST_VAR/run}}"
 ACHOST_LOG_DIR="${{ACHOST_LOG_DIR:-$ACHOST_VAR/log}}"
 ACHOST_CHROOT="${{ACHOST_CHROOT:-$ACHOST_VAR/chroot}}"
 ACHOST_NATIVE_ROOT="${{ACHOST_NATIVE_ROOT:-$ACHOST_VAR/native-root}}"
 ACHOST_CONTAINERD_STATE="${{ACHOST_CONTAINERD_STATE:-$ACHOST_VAR/containerd/state}}"
-mkdir -p "$ACHOST_VAR" "$ACHOST_VAR/docker" "$ACHOST_RUN" "$ACHOST_LOG_DIR" "$ACHOST_CHROOT" "$ACHOST_NATIVE_ROOT" "$ACHOST_VAR/containerd/root" "$ACHOST_CONTAINERD_STATE" "$ACHOST_VAR/bind-mounts" 2>/dev/null || true
+mkdir -p "$ACHOST_VAR" "$ACHOST_CONFIG" "$ACHOST_VAR/docker" "$ACHOST_RUN" "$ACHOST_LOG_DIR" "$ACHOST_CHROOT" "$ACHOST_NATIVE_ROOT" "$ACHOST_VAR/containerd/root" "$ACHOST_CONTAINERD_STATE" "$ACHOST_VAR/bind-mounts" 2>/dev/null || true
+{common_start}{docker_start}"""
 
-if [ -x "$ACHOST/bin/protect-container-daemons.sh" ]; then
-    "$ACHOST/bin/protect-container-daemons.sh" >/dev/null 2>&1 || true
+
+def customize_script(spec: ModuleSpec, start_docker_on_boot: bool = False) -> str:
+    seed_autostart = "1" if start_docker_on_boot else "0"
+    docker_setup = ""
+    if spec.include_docker:
+        docker_setup = f"""
+chmod 0755 "$ACHOST/wrappers"/* 2>/dev/null || true
+chmod 0755 "$ACHOST/etc/docker/cli-plugins"/* 2>/dev/null || true
+chmod 0755 "$MODDIR/system/bin/docker" 2>/dev/null || true
+AUTOSTART_FILE="$ACHOST_DATA/config/docker.autostart"
+[ -e "$AUTOSTART_FILE" ] || printf '{seed_autostart}\n' > "$AUTOSTART_FILE" 2>/dev/null || true
+
+if [ -d "$ACHOST/var/docker" ] && [ -n "$(ls -A "$ACHOST/var/docker" 2>/dev/null)" ]; then
+    print_msg "ACHost: found old module-local Docker data at $ACHOST/var/docker; leaving it untouched."
+    print_msg "ACHost: persistent Docker data now lives at $ACHOST_DATA/docker."
 fi
-
-if [ -x "$ACHOST/bin/container-network-watchdog.sh" ]; then
-    "$ACHOST/bin/container-network-watchdog.sh" >/dev/null 2>&1 &
-fi
-{docker_start}"""
-
-
-def customize_script() -> str:
+"""
     return f"""#!/system/bin/sh
 MODDIR="${{MODPATH:-${{0%/*}}}}"
 ACHOST="$MODDIR/achost"
-ACHOST_DATA="{KERNELSU_DATA_ROOT}"
+ACHOST_DATA="{spec.data_root}"
 
 print_msg() {{
     if command -v ui_print >/dev/null 2>&1; then
@@ -905,36 +1091,24 @@ print_msg() {{
     fi
 }}
 
-mkdir -p "$ACHOST_DATA" "$ACHOST_DATA/docker" "$ACHOST_DATA/run" "$ACHOST_DATA/log" "$ACHOST_DATA/chroot" "$ACHOST_DATA/native-root" "$ACHOST_DATA/containerd/root" "$ACHOST_DATA/containerd/state" "$ACHOST_DATA/bind-mounts" 2>/dev/null || true
+mkdir -p "$ACHOST_DATA" "$ACHOST_DATA/config" "$ACHOST_DATA/docker" "$ACHOST_DATA/run" "$ACHOST_DATA/log" "$ACHOST_DATA/chroot" "$ACHOST_DATA/native-root" "$ACHOST_DATA/containerd/root" "$ACHOST_DATA/containerd/state" "$ACHOST_DATA/bind-mounts" 2>/dev/null || true
 chmod 0755 "$MODDIR/post-fs-data.sh" "$MODDIR/service.sh" "$MODDIR/uninstall.sh" 2>/dev/null || true
 chmod 0755 "$ACHOST/bin"/* 2>/dev/null || true
-chmod 0755 "$ACHOST/wrappers"/* 2>/dev/null || true
-chmod 0755 "$ACHOST/etc/docker/cli-plugins"/* 2>/dev/null || true
-chmod 0755 "$MODDIR/system/bin/docker" 2>/dev/null || true
-
-if [ -d "$ACHOST/var/docker" ] && [ -n "$(ls -A "$ACHOST/var/docker" 2>/dev/null)" ]; then
-    print_msg "ACHost: found old module-local Docker data at $ACHOST/var/docker; leaving it untouched."
-    print_msg "ACHost: persistent Docker data now lives at $ACHOST_DATA/docker."
-fi
-"""
+{docker_setup}"""
 
 
-def uninstall_script() -> str:
-    return f"""#!/system/bin/sh
-MODDIR="${{0%/*}}"
-ACHOST="$MODDIR/achost"
-ACHOST_DATA="{KERNELSU_DATA_ROOT}"
-PATH=/system/bin:/system/xbin:/vendor/bin:/product/bin:/data/adb/magisk:$PATH
-
-if [ -r "$ACHOST/bin/achost-container-env.sh" ]; then
-    . "$ACHOST/bin/achost-container-env.sh"
-fi
-
+def uninstall_script(spec: ModuleSpec) -> str:
+    docker_stop = ""
+    if spec.include_docker:
+        docker_stop = """
 if [ -x "$ACHOST/bin/achost-docker-stop.sh" ]; then
     "$ACHOST/bin/achost-docker-stop.sh" >/dev/null 2>&1 || true
 fi
-
-pid_file="${{ACHOST_NET_PID:-/data/local/tmp/achost-network-watchdog.pid}}"
+"""
+    common_stop = ""
+    if spec.include_common:
+        common_stop = """
+pid_file="${ACHOST_NET_PID:-/data/local/tmp/achost-network-watchdog.pid}"
 if [ -r "$pid_file" ]; then
     pid="$(cat "$pid_file" 2>/dev/null || true)"
     case "$pid" in
@@ -943,7 +1117,20 @@ if [ -r "$pid_file" ]; then
     esac
 fi
 rm -f "$pid_file" /data/local/tmp/achost-network-watchdog.pid /data/local/tmp/achost-network-watchdog.log 2>/dev/null || true
+"""
+    return f"""#!/system/bin/sh
+MODDIR="${{0%/*}}"
+ACHOST="${{ACHOST:-$MODDIR/achost}}"
+ACHOST_DATA="{spec.data_root}"
+PATH=/system/bin:/system/xbin:/vendor/bin:/product/bin:/data/adb/magisk:$PATH
 
+if [ -r "$ACHOST/bin/achost-container-env.sh" ]; then
+    . "$ACHOST/bin/achost-container-env.sh"
+elif [ -r "/data/adb/modules/achost-base/achost/bin/achost-container-env.sh" ]; then
+    ACHOST_BASE="${{ACHOST_BASE:-/data/adb/modules/achost-base/achost}}"
+    . "$ACHOST_BASE/bin/achost-container-env.sh"
+fi
+{docker_stop}{common_stop}
 rm -rf "${{ACHOST_RUN:-$ACHOST_DATA/run}}" "${{ACHOST_LOG_DIR:-$ACHOST_DATA/log}}" "${{ACHOST_CHROOT:-$ACHOST_DATA/chroot}}" "${{ACHOST_NATIVE_ROOT:-$ACHOST_DATA/native-root}}" "${{ACHOST_CONTAINERD_STATE:-$ACHOST_DATA/containerd/state}}" 2>/dev/null || true
 mkdir -p "$ACHOST_DATA/docker" "$ACHOST_DATA/containerd/root" 2>/dev/null || true
 """

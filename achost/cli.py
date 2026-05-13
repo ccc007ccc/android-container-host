@@ -114,6 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_install = subparsers.add_parser("runtime-install", help="generate Android runtime install package")
     runtime_install.add_argument("--output", required=True)
     runtime_install.add_argument("--mode", choices=("manual", "kernelsu-module"), default="manual")
+    runtime_install.add_argument("--module-target", choices=("legacy", "base", "docker", "lxc"), default="legacy")
     runtime_install.add_argument("--cgroup-mode", choices=("v1", "v2"), default="v1")
     runtime_install.add_argument("--docker-runtime-mode", choices=("chroot", "native"), default="chroot")
     runtime_install.add_argument("--docker-asset")
@@ -269,6 +270,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         lxc_sha256=args.lxc_sha256,
         start_docker_on_boot=args.start_docker_on_boot,
         docker_runtime_mode=args.docker_runtime_mode,
+        module_target=args.module_target,
     )
     if args.zip_output is not None:
         zip_output = None if args.zip_output == "auto" else args.zip_output
