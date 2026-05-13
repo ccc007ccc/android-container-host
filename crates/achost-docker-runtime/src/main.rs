@@ -2,7 +2,7 @@ use std::env;
 use std::ffi::CString;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{symlink, FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -33,57 +33,88 @@ const FILTER_DELETE_CHAINS: &[&str] = &[
 #[derive(Debug)]
 struct DockerRuntimeConfig {
     achost: PathBuf,
+    achost_bin: PathBuf,
+    common_bin: PathBuf,
     runtime_mode: String,
     use_chroot: bool,
+    cgroup_mode: String,
     chroot: PathBuf,
+    chroot_launch_mode: String,
     native_root: PathBuf,
     run: PathBuf,
     docker_root: PathBuf,
+    docker_exec_root: PathBuf,
     containerd_root: PathBuf,
     containerd_state: PathBuf,
     docker_config: PathBuf,
     dockerd_config: PathBuf,
     containerd_config: PathBuf,
-    supervisor_pid: PathBuf,
+    docker_host: String,
     docker_socket: Option<PathBuf>,
     compat_host: Option<String>,
     compat_socket: Option<PathBuf>,
     containerd_address: PathBuf,
     dns_servers: Vec<String>,
+    supervise: PathBuf,
+    use_supervisor: bool,
+    supervisor_pid: PathBuf,
+    supervisor_socket: PathBuf,
+    supervisor_log: PathBuf,
     dockerd_pid: PathBuf,
     dockerd_launch_pid: PathBuf,
+    dockerd_log: PathBuf,
     containerd_pid: PathBuf,
+    containerd_log: PathBuf,
+    external_containerd: bool,
+    container_bridge: String,
 }
 
 impl DockerRuntimeConfig {
     fn from_env() -> Self {
         let achost = env_path("ACHOST").unwrap_or_else(|| PathBuf::from("/data/adb/achost"));
         let achost_var = env_path("ACHOST_VAR").unwrap_or_else(|| achost.join("var"));
+        let achost_bin = env_path("ACHOST_BIN").unwrap_or_else(|| achost.join("bin"));
+        let common_bin = env_path("ACHOST_COMMON_BIN").unwrap_or_else(|| achost_bin.clone());
         let run = env_path("ACHOST_RUN").unwrap_or_else(|| achost_var.join("run"));
+        let log_dir = env_path("ACHOST_LOG_DIR").unwrap_or_else(|| achost_var.join("log"));
         let runtime_mode = env::var("ACHOST_RUNTIME_MODE").unwrap_or_else(|_| "native".to_string());
         let use_chroot = match env::var("ACHOST_USE_CHROOT") {
             Ok(value) => value == "1",
             Err(_) => runtime_mode == "chroot",
         };
-        let docker_socket = match env::var("DOCKER_HOST") {
-            Ok(value) => unix_socket_path(&value),
-            Err(env::VarError::NotPresent) => Some(run.join("docker.sock")),
-            Err(env::VarError::NotUnicode(_)) => None,
+        let docker_host = match env::var("DOCKER_HOST") {
+            Ok(value) => value,
+            Err(env::VarError::NotPresent) => {
+                format!("unix://{}", run.join("docker.sock").display())
+            }
+            Err(env::VarError::NotUnicode(_)) => String::new(),
         };
+        let docker_socket = unix_socket_path(&docker_host);
         let compat_host = env::var("ACHOST_DOCKER_COMPAT_HOST")
-            .ok()
-            .filter(|value| !matches!(value.as_str(), "" | "0" | "none"));
+            .unwrap_or_else(|_| "unix:///var/run/docker.sock".to_string());
+        let compat_host =
+            (!matches!(compat_host.as_str(), "" | "0" | "none")).then_some(compat_host);
         let compat_socket = compat_host.as_deref().and_then(unix_socket_path);
+        let container_bridge = env::var("CONTAINER_BRIDGE")
+            .or_else(|_| env::var("DOCKER_BRIDGE"))
+            .unwrap_or_else(|_| "docker0".to_string());
         Self {
             achost: achost.clone(),
+            achost_bin,
+            common_bin: common_bin.clone(),
             runtime_mode,
             use_chroot,
+            cgroup_mode: env::var("ACHOST_CGROUP_MODE").unwrap_or_else(|_| "v1".to_string()),
             chroot: env_path("ACHOST_CHROOT").unwrap_or_else(|| achost_var.join("chroot")),
+            chroot_launch_mode: env::var("ACHOST_CHROOT_LAUNCH_MODE")
+                .unwrap_or_else(|_| "pivot".to_string()),
             native_root: env_path("ACHOST_NATIVE_ROOT")
                 .unwrap_or_else(|| achost_var.join("native-root")),
             run: run.clone(),
             docker_root: env_path("ACHOST_DOCKER_ROOT")
                 .unwrap_or_else(|| achost_var.join("docker")),
+            docker_exec_root: env_path("ACHOST_DOCKER_EXEC_ROOT")
+                .unwrap_or_else(|| run.join("docker-exec")),
             containerd_root: env_path("ACHOST_CONTAINERD_ROOT")
                 .unwrap_or_else(|| achost_var.join("containerd/root")),
             containerd_state: env_path("ACHOST_CONTAINERD_STATE")
@@ -93,8 +124,7 @@ impl DockerRuntimeConfig {
                 .unwrap_or_else(|| run.join("dockerd-daemon.json")),
             containerd_config: env_path("ACHOST_CONTAINERD_CONFIG")
                 .unwrap_or_else(|| achost.join("etc/containerd/config.toml")),
-            supervisor_pid: env_path("ACHOST_SUPERVISOR_PID")
-                .unwrap_or_else(|| run.join("achost-supervise.pid")),
+            docker_host,
             docker_socket,
             compat_host,
             compat_socket,
@@ -105,11 +135,27 @@ impl DockerRuntimeConfig {
                 .split_whitespace()
                 .map(str::to_string)
                 .collect(),
+            supervise: env_path("ACHOST_SUPERVISE")
+                .unwrap_or_else(|| common_bin.join("achost-supervise")),
+            use_supervisor: env::var("ACHOST_USE_SUPERVISOR").map_or(true, |value| value != "0"),
+            supervisor_pid: env_path("ACHOST_SUPERVISOR_PID")
+                .unwrap_or_else(|| run.join("achost-supervise.pid")),
+            supervisor_socket: env_path("ACHOST_SUPERVISOR_SOCKET")
+                .unwrap_or_else(|| run.join("achost-supervise.sock")),
+            supervisor_log: env_path("ACHOST_SUPERVISOR_LOG")
+                .unwrap_or_else(|| log_dir.join("achost-supervise.log")),
             dockerd_pid: env_path("ACHOST_DOCKERD_PID").unwrap_or_else(|| run.join("dockerd.pid")),
             dockerd_launch_pid: env_path("ACHOST_DOCKERD_LAUNCH_PID")
                 .unwrap_or_else(|| run.join("dockerd-launch.pid")),
+            dockerd_log: env_path("ACHOST_DOCKERD_LOG")
+                .unwrap_or_else(|| log_dir.join("dockerd.log")),
             containerd_pid: env_path("ACHOST_CONTAINERD_PID")
                 .unwrap_or_else(|| run.join("containerd.pid")),
+            containerd_log: env_path("ACHOST_CONTAINERD_LOG")
+                .unwrap_or_else(|| log_dir.join("containerd.log")),
+            external_containerd: env::var("ACHOST_EXTERNAL_CONTAINERD")
+                .map_or(true, |value| value == "1"),
+            container_bridge,
         }
     }
 }
@@ -174,13 +220,14 @@ fn main() {
         }
         Some("write-configs") => run_write_configs(),
         Some("namespace-diagnostics") => run_namespace_diagnostics(),
+        Some("start") => run_start(&args[2..]),
         Some("stop") => run_stop(),
         Some(command) => {
             eprintln!("unsupported command: {command}");
             2
         }
         None => {
-            eprintln!("usage: achost-docker-runtime <cleanup-stale-iptables|prepare-native-root|native-preflight|prepare-compat-socket|prepare-cgroups|write-configs|namespace-diagnostics|stop>");
+            eprintln!("usage: achost-docker-runtime <cleanup-stale-iptables|prepare-native-root|native-preflight|prepare-compat-socket|prepare-cgroups|write-configs|namespace-diagnostics|start|stop>");
             2
         }
     };
@@ -237,6 +284,15 @@ fn run_namespace_diagnostics() -> i32 {
     0
 }
 
+fn run_start(extra_dockerd_args: &[String]) -> i32 {
+    let config = DockerRuntimeConfig::from_env();
+    if let Err(error) = start_runtime(&config, extra_dockerd_args) {
+        eprintln!("{error}");
+        return 1;
+    }
+    0
+}
+
 fn write_configs(config: &DockerRuntimeConfig) -> std::io::Result<()> {
     write_dockerd_config(config)?;
     write_containerd_config(config)
@@ -267,6 +323,159 @@ fn write_containerd_config(config: &DockerRuntimeConfig) -> std::io::Result<()> 
             path_string(&config.run),
         ),
     )
+}
+
+fn start_runtime(
+    config: &DockerRuntimeConfig,
+    extra_dockerd_args: &[String],
+) -> Result<(), String> {
+    require_start_executables(config)?;
+    create_start_dirs(config)?;
+    println!("runtime_mode={}", config.runtime_mode);
+    println!("use_chroot={}", if config.use_chroot { "1" } else { "0" });
+    println!("cgroup_mode={}", config.cgroup_mode);
+    println!("chroot_launch_mode={}", config.chroot_launch_mode);
+
+    if config.use_supervisor && !is_executable(&config.supervise) {
+        eprintln!("warning: achost-supervise missing; daemon descendants may be reparented to Android init");
+    }
+    if config.use_chroot {
+        return Err("Docker chroot startup is not supported by achost-docker-runtime start; use native runtime".to_string());
+    }
+
+    prepare_native_root(config).map_err(|error| format!("prepare native root failed: {error}"))?;
+    prepare_cgroups();
+    if !ensure_supervisor_server(config) {
+        eprintln!("warning: native supervisor server not ready; private /run unavailable");
+    }
+    native_preflight(config);
+    run_protect_daemons(config);
+    spawn_network_watchdog(config);
+    write_configs(config)
+        .map_err(|error| format!("write Docker runtime configs failed: {error}"))?;
+
+    if config.external_containerd {
+        if pid_running_file(&config.containerd_pid) {
+            if let Some(pid) = read_trimmed(&config.containerd_pid) {
+                println!("containerd already running pid={pid}");
+            }
+        } else {
+            remove_file_quiet(&config.containerd_pid);
+            remove_file_quiet(&config.containerd_address);
+            start_containerd_daemon(config);
+            if wait_for_socket(&config.containerd_address) {
+                if let Some(pid) = read_trimmed(&config.containerd_pid) {
+                    println!("containerd started pid={pid}");
+                }
+            } else {
+                eprintln!(
+                    "containerd socket not ready: {}",
+                    config.containerd_address.display()
+                );
+            }
+        }
+    } else {
+        remove_file_quiet(&config.containerd_pid);
+        remove_file_quiet(&config.containerd_address);
+        println!("external containerd disabled; dockerd will manage containerd");
+    }
+
+    let compat_host = prepare_compat_socket(config);
+    if pid_running_file(&config.dockerd_pid) {
+        if let Some(pid) = read_trimmed(&config.dockerd_pid) {
+            println!("dockerd already running pid={pid}");
+        }
+    } else {
+        remove_file_quiet(&config.dockerd_pid);
+        remove_file_quiet(&config.dockerd_launch_pid);
+        if let Some(path) = config.docker_socket.as_deref() {
+            remove_file_quiet(path);
+        }
+        if let Some(path) = config.compat_socket.as_deref() {
+            remove_file_quiet(path);
+        }
+        cleanup_stale_iptables();
+        start_dockerd(config, compat_host.as_deref(), extra_dockerd_args);
+        if let Some(socket) = config.docker_socket.as_deref() {
+            if wait_for_socket(socket) {
+                if let Some(pid) = dockerd_pid_for_display(config) {
+                    println!("dockerd started pid={pid}");
+                }
+                if supervisor_server_running(config) {
+                    if let Some(pid) = read_trimmed(&config.supervisor_pid) {
+                        println!("supervisor_pid={pid}");
+                    }
+                }
+            } else {
+                eprintln!("dockerd socket not ready: {}", socket.display());
+            }
+        }
+    }
+
+    namespace_diagnostics(config);
+    if reconcile_network_once(config) {
+        println!("network reconciled bridge={}", config.container_bridge);
+    } else {
+        eprintln!(
+            "warning: network reconciliation pending for bridge={}",
+            config.container_bridge
+        );
+    }
+    println!("DOCKER_HOST={}", config.docker_host);
+    if let Some(host) = compat_host.as_deref() {
+        println!("DOCKER_COMPAT_HOST={host}");
+    }
+    println!("dockerd_log={}", config.dockerd_log.display());
+    println!("containerd_log={}", config.containerd_log.display());
+    Ok(())
+}
+
+fn require_start_executables(config: &DockerRuntimeConfig) -> Result<(), String> {
+    for name in [
+        "docker",
+        "dockerd",
+        "containerd",
+        "containerd-shim-runc-v2",
+        "ctr",
+        "runc",
+    ] {
+        let path = config.achost_bin.join(name);
+        if !is_executable(&path) {
+            return Err(format!("missing executable: {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
+fn create_start_dirs(config: &DockerRuntimeConfig) -> Result<(), String> {
+    for path in [
+        &config.docker_root,
+        &config.docker_exec_root,
+        &config.containerd_root,
+        &config.containerd_state,
+        &config.run,
+        &config.native_root,
+    ] {
+        fs::create_dir_all(path)
+            .map_err(|error| format!("create {} failed: {error}", path.display()))?;
+    }
+    for log in [
+        &config.supervisor_log,
+        &config.dockerd_log,
+        &config.containerd_log,
+    ] {
+        if let Some(parent) = log.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("create log directory failed: {error}"))?;
+        }
+    }
+    fs::create_dir_all(config.docker_config.join("cli-plugins"))
+        .map_err(|error| format!("create Docker config directory failed: {error}"))?;
+    if let Some(parent) = config.containerd_config.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create containerd config directory failed: {error}"))?;
+    }
+    Ok(())
 }
 
 fn prepare_cgroups() -> Option<PathBuf> {
@@ -314,6 +523,251 @@ fn ensure_host_memory_cgroup() -> Option<PathBuf> {
 
 fn mount_cgroup(controller: &str, target: &Path) -> bool {
     mount_fs("none", target, "cgroup", controller)
+}
+
+fn pid_running_file(pid_file: &Path) -> bool {
+    pid_from_file(pid_file).is_some_and(pid_alive)
+}
+
+fn dockerd_pid_for_display(config: &DockerRuntimeConfig) -> Option<String> {
+    pid_running_file(&config.dockerd_pid).then(|| read_trimmed(&config.dockerd_pid))?
+}
+
+fn supervisor_server_running(config: &DockerRuntimeConfig) -> bool {
+    pid_running_file(&config.supervisor_pid) && is_socket(&config.supervisor_socket)
+}
+
+fn ensure_supervisor_server(config: &DockerRuntimeConfig) -> bool {
+    if !config.use_supervisor || !is_executable(&config.supervise) {
+        return false;
+    }
+    if supervisor_server_running(config) {
+        return true;
+    }
+    remove_file_quiet(&config.supervisor_pid);
+    remove_file_quiet(&config.supervisor_socket);
+    let Ok((stdout, stderr)) = log_stdio(&config.supervisor_log) else {
+        eprintln!(
+            "warning: unable to open supervisor log: {}",
+            config.supervisor_log.display()
+        );
+        return false;
+    };
+    let mut command = Command::new(&config.supervise);
+    command
+        .arg("--server")
+        .arg("--socket")
+        .arg(&config.supervisor_socket)
+        .arg("--pid-file")
+        .arg(&config.supervisor_pid)
+        .arg("--native-root")
+        .arg(&config.native_root)
+        .stdin(Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr);
+    if command.spawn().is_err() {
+        return false;
+    }
+    for _ in 0..10 {
+        if supervisor_server_running(config) {
+            return true;
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    false
+}
+
+fn log_stdio(path: &Path) -> std::io::Result<(Stdio, Stdio)> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let stdout = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    let stderr = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    Ok((stdout.into(), stderr.into()))
+}
+
+fn start_containerd_daemon(config: &DockerRuntimeConfig) -> bool {
+    let args = vec![
+        path_string(&config.achost_bin.join("containerd")),
+        "--config".to_string(),
+        path_string(&config.containerd_config),
+        "--log-level".to_string(),
+        "debug".to_string(),
+    ];
+    start_daemon_command(
+        config,
+        "containerd",
+        &config.containerd_pid,
+        &config.containerd_log,
+        &args,
+    )
+}
+
+fn start_dockerd(
+    config: &DockerRuntimeConfig,
+    compat_host: Option<&str>,
+    extra_dockerd_args: &[String],
+) -> bool {
+    let mut args = vec![
+        path_string(&config.achost_bin.join("dockerd")),
+        "--config-file".to_string(),
+        path_string(&config.dockerd_config),
+        "--data-root".to_string(),
+        path_string(&config.docker_root),
+        "--exec-root".to_string(),
+        path_string(&config.docker_exec_root),
+        "--pidfile".to_string(),
+        path_string(&config.dockerd_pid),
+        "--host".to_string(),
+        config.docker_host.clone(),
+    ];
+    if let Some(host) = compat_host {
+        args.push("--host".to_string());
+        args.push(host.to_string());
+    }
+    if config.external_containerd {
+        args.push("--containerd".to_string());
+        args.push(path_string(&config.containerd_address));
+    }
+    args.extend(extra_dockerd_args.iter().cloned());
+    start_daemon_command(
+        config,
+        "dockerd",
+        &config.dockerd_launch_pid,
+        &config.dockerd_log,
+        &args,
+    )
+}
+
+fn start_daemon_command(
+    config: &DockerRuntimeConfig,
+    name: &str,
+    pid_file: &Path,
+    log_file: &Path,
+    argv: &[String],
+) -> bool {
+    if !ensure_supervisor_server(config) {
+        eprintln!("error: achost-supervise server unavailable for {name}");
+        return false;
+    }
+    let status = Command::new(&config.supervise)
+        .arg("--client")
+        .arg("--socket")
+        .arg(&config.supervisor_socket)
+        .arg("--name")
+        .arg(name)
+        .arg("--pid-file")
+        .arg(pid_file)
+        .arg("--")
+        .arg(&config.supervise)
+        .arg("--launch")
+        .arg("--log-file")
+        .arg(log_file)
+        .arg("--")
+        .args(argv)
+        .status();
+    if status.is_ok_and(|status| status.success()) {
+        true
+    } else {
+        eprintln!("error: achost-supervise client failed for {name}");
+        false
+    }
+}
+
+fn wait_for_socket(path: &Path) -> bool {
+    for _ in 0..30 {
+        if is_socket(path) {
+            return true;
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    false
+}
+
+fn is_socket(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|metadata| metadata.file_type().is_socket())
+        .unwrap_or(false)
+}
+
+fn reconcile_network_once(config: &DockerRuntimeConfig) -> bool {
+    if !wait_for_bridge(&config.container_bridge) {
+        return false;
+    }
+    for helper in [
+        config.common_bin.join("container-nat-manager.sh"),
+        config.achost_bin.join("container-nat-manager.sh"),
+    ] {
+        if is_executable(&helper) {
+            return command_success_path(&helper, &[]);
+        }
+    }
+    true
+}
+
+fn wait_for_bridge(bridge: &str) -> bool {
+    for _ in 0..30 {
+        if Command::new("ip")
+            .arg("addr")
+            .arg("show")
+            .arg(bridge)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return true;
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    false
+}
+
+fn run_protect_daemons(config: &DockerRuntimeConfig) {
+    let helper = config.common_bin.join("protect-container-daemons.sh");
+    if is_executable(&helper) {
+        command_success_path(&helper, &[]);
+    }
+}
+
+fn spawn_network_watchdog(config: &DockerRuntimeConfig) {
+    let helper = config.common_bin.join("container-network-watchdog.sh");
+    if !is_executable(&helper) {
+        return;
+    }
+    Command::new(helper)
+        .env(
+            "ACHOST_NET_LOG",
+            env::var("ACHOST_NET_LOG")
+                .unwrap_or_else(|_| "/data/local/tmp/achost-network-watchdog.log".to_string()),
+        )
+        .env(
+            "ACHOST_NET_PID",
+            env::var("ACHOST_NET_PID")
+                .unwrap_or_else(|_| "/data/local/tmp/achost-network-watchdog.pid".to_string()),
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok();
+}
+
+fn command_success_path(path: &Path, args: &[&str]) -> bool {
+    Command::new(path)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn prepare_native_root(config: &DockerRuntimeConfig) -> std::io::Result<()> {
