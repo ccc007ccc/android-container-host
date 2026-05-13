@@ -381,53 +381,6 @@ reconcile_network_once() {
     "$ACHOST_BIN/container-nat-manager.sh" >/dev/null 2>&1
 }
 
-write_dockerd_config() {
-    dockerd_template="$DOCKER_CONFIG/daemon.json"
-    if [ ! -r "$dockerd_template" ]; then
-        printf 'missing dockerd config template: %s\n' "$dockerd_template" >&2
-        exit 1
-    fi
-    mkdir -p "$(dirname -- "$ACHOST_DOCKERD_CONFIG")"
-    awk -v prefix="$ACHOST" '{ gsub(/@ACHOST_PREFIX@/, prefix); print }' "$dockerd_template" > "$ACHOST_DOCKERD_CONFIG"
-}
-
-write_containerd_config() {
-    cat > "$ACHOST_CONTAINERD_CONFIG" <<EOF
-version = 3
-root = '$ACHOST_CONTAINERD_ROOT'
-state = '$ACHOST_CONTAINERD_STATE'
-temp = '$ACHOST_RUN/containerd-tmp'
-disabled_plugins = ['io.containerd.grpc.v1.cri', 'io.containerd.cri.v1.images', 'io.containerd.cri.v1.runtime']
-required_plugins = []
-oom_score = 0
-imports = []
-
-[grpc]
-  address = '$CONTAINERD_ADDRESS'
-  tcp_address = ''
-  uid = 0
-  gid = 0
-
-[debug]
-  address = ''
-  uid = 0
-  gid = 0
-  level = 'debug'
-
-[metrics]
-  address = ''
-  grpc_histogram = false
-
-[plugins.'io.containerd.cri.v1.runtime']
-  enable_cdi = false
-  cdi_spec_dirs = []
-
-[plugins.'io.containerd.nri.v1.nri']
-  disable = true
-  socket_path = '$ACHOST_RUN/nri.sock'
-EOF
-}
-
 start_containerd_daemon() {
     if [ "$ACHOST_USE_CHROOT" = "1" ]; then
         start_daemon_command containerd "$ACHOST_CONTAINERD_PID" "$ACHOST_CONTAINERD_LOG" "$ACHOST_CHROOT" \
@@ -504,8 +457,9 @@ if [ -x "$COMMON_BIN/container-network-watchdog.sh" ]; then
     "$COMMON_BIN/container-network-watchdog.sh" >/dev/null 2>&1 &
 fi
 
+"$ACHOST_DOCKER_RUNTIME" write-configs
+
 if [ "$ACHOST_EXTERNAL_CONTAINERD" = "1" ]; then
-    write_containerd_config
     if pid_running "$ACHOST_CONTAINERD_PID"; then
         printf 'containerd already running pid=%s\n' "$(cat "$ACHOST_CONTAINERD_PID")"
     else
@@ -522,7 +476,6 @@ else
     printf 'external containerd disabled; dockerd will manage containerd\n'
 fi
 
-write_dockerd_config
 ACHOST_DOCKER_COMPAT_HOST="$("$ACHOST_DOCKER_RUNTIME" prepare-compat-socket)"
 
 if dockerd_running; then

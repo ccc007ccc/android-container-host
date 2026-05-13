@@ -32,6 +32,7 @@ const FILTER_DELETE_CHAINS: &[&str] = &[
 
 #[derive(Debug)]
 struct DockerRuntimeConfig {
+    achost: PathBuf,
     runtime_mode: String,
     use_chroot: bool,
     chroot: PathBuf,
@@ -40,6 +41,9 @@ struct DockerRuntimeConfig {
     docker_root: PathBuf,
     containerd_root: PathBuf,
     containerd_state: PathBuf,
+    docker_config: PathBuf,
+    dockerd_config: PathBuf,
+    containerd_config: PathBuf,
     supervisor_pid: PathBuf,
     docker_socket: Option<PathBuf>,
     compat_host: Option<String>,
@@ -71,6 +75,7 @@ impl DockerRuntimeConfig {
             .filter(|value| !matches!(value.as_str(), "" | "0" | "none"));
         let compat_socket = compat_host.as_deref().and_then(unix_socket_path);
         Self {
+            achost: achost.clone(),
             runtime_mode,
             use_chroot,
             chroot: env_path("ACHOST_CHROOT").unwrap_or_else(|| achost_var.join("chroot")),
@@ -83,6 +88,11 @@ impl DockerRuntimeConfig {
                 .unwrap_or_else(|| achost_var.join("containerd/root")),
             containerd_state: env_path("ACHOST_CONTAINERD_STATE")
                 .unwrap_or_else(|| achost_var.join("containerd/state")),
+            docker_config: env_path("DOCKER_CONFIG").unwrap_or_else(|| achost.join("etc/docker")),
+            dockerd_config: env_path("ACHOST_DOCKERD_CONFIG")
+                .unwrap_or_else(|| run.join("dockerd-daemon.json")),
+            containerd_config: env_path("ACHOST_CONTAINERD_CONFIG")
+                .unwrap_or_else(|| achost.join("etc/containerd/config.toml")),
             supervisor_pid: env_path("ACHOST_SUPERVISOR_PID")
                 .unwrap_or_else(|| run.join("achost-supervise.pid")),
             docker_socket,
@@ -159,6 +169,7 @@ fn main() {
         Some("prepare-native-root") => run_prepare_native_root(),
         Some("native-preflight") => run_native_preflight(),
         Some("prepare-compat-socket") => run_prepare_compat_socket(),
+        Some("write-configs") => run_write_configs(),
         Some("namespace-diagnostics") => run_namespace_diagnostics(),
         Some("stop") => run_stop(),
         Some(command) => {
@@ -166,7 +177,7 @@ fn main() {
             2
         }
         None => {
-            eprintln!("usage: achost-docker-runtime <cleanup-stale-iptables|prepare-native-root|native-preflight|prepare-compat-socket|namespace-diagnostics|stop>");
+            eprintln!("usage: achost-docker-runtime <cleanup-stale-iptables|prepare-native-root|native-preflight|prepare-compat-socket|write-configs|namespace-diagnostics|stop>");
             2
         }
     };
@@ -197,10 +208,51 @@ fn run_prepare_compat_socket() -> i32 {
     0
 }
 
+fn run_write_configs() -> i32 {
+    let config = DockerRuntimeConfig::from_env();
+    if let Err(error) = write_configs(&config) {
+        eprintln!("write Docker runtime configs failed: {error}");
+        return 1;
+    }
+    0
+}
+
 fn run_namespace_diagnostics() -> i32 {
     let config = DockerRuntimeConfig::from_env();
     namespace_diagnostics(&config);
     0
+}
+
+fn write_configs(config: &DockerRuntimeConfig) -> std::io::Result<()> {
+    write_dockerd_config(config)?;
+    write_containerd_config(config)
+}
+
+fn write_dockerd_config(config: &DockerRuntimeConfig) -> std::io::Result<()> {
+    let template = config.docker_config.join("daemon.json");
+    let raw = fs::read_to_string(&template)?;
+    let rendered = raw.replace("@ACHOST_PREFIX@", &path_string(&config.achost));
+    if let Some(parent) = config.dockerd_config.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&config.dockerd_config, rendered)
+}
+
+fn write_containerd_config(config: &DockerRuntimeConfig) -> std::io::Result<()> {
+    if let Some(parent) = config.containerd_config.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        &config.containerd_config,
+        format!(
+            "version = 3\nroot = '{}'\nstate = '{}'\ntemp = '{}/containerd-tmp'\ndisabled_plugins = ['io.containerd.grpc.v1.cri', 'io.containerd.cri.v1.images', 'io.containerd.cri.v1.runtime']\nrequired_plugins = []\noom_score = 0\nimports = []\n\n[grpc]\n  address = '{}'\n  tcp_address = ''\n  uid = 0\n  gid = 0\n\n[debug]\n  address = ''\n  uid = 0\n  gid = 0\n  level = 'debug'\n\n[metrics]\n  address = ''\n  grpc_histogram = false\n\n[plugins.'io.containerd.cri.v1.runtime']\n  enable_cdi = false\n  cdi_spec_dirs = []\n\n[plugins.'io.containerd.nri.v1.nri']\n  disable = true\n  socket_path = '{}/nri.sock'\n",
+            path_string(&config.containerd_root),
+            path_string(&config.containerd_state),
+            path_string(&config.run),
+            path_string(&config.containerd_address),
+            path_string(&config.run),
+        ),
+    )
 }
 
 fn prepare_native_root(config: &DockerRuntimeConfig) -> std::io::Result<()> {
