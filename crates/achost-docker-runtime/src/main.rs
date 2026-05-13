@@ -169,6 +169,9 @@ fn main() {
         Some("prepare-native-root") => run_prepare_native_root(),
         Some("native-preflight") => run_native_preflight(),
         Some("prepare-compat-socket") => run_prepare_compat_socket(),
+        Some("prepare-cgroups") => {
+            run_prepare_cgroups(args.iter().skip(2).any(|arg| arg == "--print-memory"))
+        }
         Some("write-configs") => run_write_configs(),
         Some("namespace-diagnostics") => run_namespace_diagnostics(),
         Some("stop") => run_stop(),
@@ -177,7 +180,7 @@ fn main() {
             2
         }
         None => {
-            eprintln!("usage: achost-docker-runtime <cleanup-stale-iptables|prepare-native-root|native-preflight|prepare-compat-socket|write-configs|namespace-diagnostics|stop>");
+            eprintln!("usage: achost-docker-runtime <cleanup-stale-iptables|prepare-native-root|native-preflight|prepare-compat-socket|prepare-cgroups|write-configs|namespace-diagnostics|stop>");
             2
         }
     };
@@ -205,6 +208,17 @@ fn run_prepare_compat_socket() -> i32 {
         return 0;
     };
     println!("{host}");
+    0
+}
+
+fn run_prepare_cgroups(print_memory: bool) -> i32 {
+    let memory_mount = prepare_cgroups();
+    if print_memory {
+        let Some(path) = memory_mount else {
+            return 1;
+        };
+        println!("{}", path.display());
+    }
     0
 }
 
@@ -253,6 +267,53 @@ fn write_containerd_config(config: &DockerRuntimeConfig) -> std::io::Result<()> 
             path_string(&config.run),
         ),
     )
+}
+
+fn prepare_cgroups() -> Option<PathBuf> {
+    setup_devices_cgroup();
+    ensure_host_memory_cgroup()
+}
+
+fn setup_devices_cgroup() {
+    if !cgroup_controller_available("devices") || has_cgroup_mount("devices") {
+        return;
+    }
+    let path = Path::new("/dev/achost-cgroup/devices");
+    if fs::create_dir_all(path).is_err() || !mount_cgroup("devices", path) {
+        eprintln!("warning: unable to mount devices cgroup");
+    }
+}
+
+fn ensure_host_memory_cgroup() -> Option<PathBuf> {
+    if let Some(path) = cgroup_v1_mount_point("memory", Some(Path::new("/dev/memcg"))) {
+        return Some(path);
+    }
+    if !cgroup_controller_available("memory") {
+        eprintln!("warning: memory cgroup controller unavailable");
+        return None;
+    }
+    if let Ok(controllers) = fs::read_to_string("/sys/fs/cgroup/cgroup.controllers") {
+        if controllers.split_whitespace().any(|item| item == "memory") {
+            eprintln!(
+                "warning: memory still exposed in cgroup2; confirm cgroup_no_v2=memory is active"
+            );
+        }
+    }
+    let path = Path::new("/dev/memcg");
+    if fs::create_dir_all(path).is_err() {
+        eprintln!("warning: unable to create /dev/memcg");
+        return None;
+    }
+    if !mount_cgroup("memory", path) {
+        eprintln!("warning: unable to mount memory cgroup at /dev/memcg");
+        return None;
+    }
+    make_mount_private(path);
+    Some(path.to_path_buf())
+}
+
+fn mount_cgroup(controller: &str, target: &Path) -> bool {
+    mount_fs("none", target, "cgroup", controller)
 }
 
 fn prepare_native_root(config: &DockerRuntimeConfig) -> std::io::Result<()> {
@@ -864,6 +925,26 @@ fn mount_private(path: &Path, flags: libc::c_ulong) -> bool {
             std::ptr::null::<libc::c_char>(),
             flags,
             std::ptr::null::<libc::c_void>(),
+        ) == 0
+    }
+}
+
+fn mount_fs(source: &str, target: &Path, fs_type: &str, data: &str) -> bool {
+    let (Ok(c_source), Some(c_target), Ok(c_fs_type), Ok(c_data)) = (
+        CString::new(source),
+        c_path(target),
+        CString::new(fs_type),
+        CString::new(data),
+    ) else {
+        return false;
+    };
+    unsafe {
+        libc::mount(
+            c_source.as_ptr(),
+            c_target.as_ptr(),
+            c_fs_type.as_ptr(),
+            0,
+            c_data.as_ptr().cast::<libc::c_void>(),
         ) == 0
     }
 }

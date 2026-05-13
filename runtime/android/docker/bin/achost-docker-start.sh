@@ -149,76 +149,12 @@ bind_mount() {
     make_mount_private "$dst"
 }
 
-cgroup_v1_mount_point() {
-    controller="$1"
-    preferred="${2:-}"
-    if [ -n "$preferred" ]; then
-        while read -r _mount_src mount_dst mount_type mount_opts _rest; do
-            [ "$mount_dst" = "$preferred" ] || continue
-            [ "$mount_type" = "cgroup" ] || continue
-            case ",$mount_opts," in
-                *,"$controller",*) printf '%s\n' "$mount_dst"; return 0 ;;
-            esac
-        done < /proc/mounts
-    fi
-    while read -r _mount_src mount_dst mount_type mount_opts _rest; do
-        [ "$mount_type" = "cgroup" ] || continue
-        case ",$mount_opts," in
-            *,"$controller",*) printf '%s\n' "$mount_dst"; return 0 ;;
-        esac
-    done < /proc/mounts
-    return 1
-}
-
-has_devices_cgroup_mount() {
-    cgroup_v1_mount_point devices >/dev/null
-}
-
 cgroup_controller_available() {
     controller="$1"
     while read -r name _hierarchy _num enabled; do
         [ "$name" = "$controller" ] && [ "$enabled" = "1" ] && return 0
     done < /proc/cgroups
     return 1
-}
-
-cgroup_devices_available() {
-    cgroup_controller_available devices
-}
-
-setup_devices_cgroup() {
-    cgroup_devices_available || return 0
-    has_devices_cgroup_mount && return 0
-    mkdir -p /dev/achost-cgroup/devices
-    mount -t cgroup -o devices none /dev/achost-cgroup/devices 2>/dev/null || \
-        printf 'warning: unable to mount devices cgroup\n' >&2
-}
-
-ensure_host_memory_cgroup() {
-    if memory_mount="$(cgroup_v1_mount_point memory /dev/memcg)"; then
-        printf '%s\n' "$memory_mount"
-        return 0
-    fi
-    if ! cgroup_controller_available memory; then
-        printf 'warning: memory cgroup controller unavailable\n' >&2
-        return 1
-    fi
-    if [ -r /sys/fs/cgroup/cgroup.controllers ]; then
-        cgroup2_controllers="$(cat /sys/fs/cgroup/cgroup.controllers 2>/dev/null || true)"
-        case " $cgroup2_controllers " in
-            *' memory '*) printf 'warning: memory still exposed in cgroup2; confirm cgroup_no_v2=memory is active\n' >&2 ;;
-        esac
-    fi
-    mkdir -p /dev/memcg 2>/dev/null || {
-        printf 'warning: unable to create /dev/memcg\n' >&2
-        return 1
-    }
-    if ! mount -t cgroup -o memory none /dev/memcg 2>/dev/null; then
-        printf 'warning: unable to mount memory cgroup at /dev/memcg\n' >&2
-        return 1
-    fi
-    make_mount_private /dev/memcg
-    printf '/dev/memcg\n'
 }
 
 bind_chroot_path() {
@@ -276,7 +212,7 @@ mount_chroot_memory_cgroup_v1() {
     dst="$ACHOST_CHROOT/sys/fs/cgroup/memory"
     mkdir -p "$dst" 2>/dev/null || return 0
     is_mounted "$dst" && return 0
-    if memory_mount="$(ensure_host_memory_cgroup)"; then
+    if memory_mount="$($ACHOST_DOCKER_RUNTIME prepare-cgroups --print-memory)"; then
         if mount --bind "$memory_mount" "$dst" 2>/dev/null; then
             make_mount_private "$dst"
             return 0
@@ -440,8 +376,7 @@ if [ "$ACHOST_USE_CHROOT" = "1" ]; then
     setup_chroot
 else
     "$ACHOST_DOCKER_RUNTIME" prepare-native-root
-    setup_devices_cgroup
-    ensure_host_memory_cgroup >/dev/null || true
+    "$ACHOST_DOCKER_RUNTIME" prepare-cgroups >/dev/null || true
     ensure_supervisor_server || printf 'warning: native supervisor server not ready; private /run unavailable\n' >&2
     "$ACHOST_DOCKER_RUNTIME" native-preflight
 fi
