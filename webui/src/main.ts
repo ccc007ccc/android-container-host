@@ -367,7 +367,7 @@ function renderImages(): string {
             </div>
             <div><span>${escapeHtml(item.size)}</span><small>${escapeHtml(item.created)}</small></div>
             <div class="row-actions">
-              <button class="small danger" data-remove-image="${escapeHtml(imageName(item))}" ${busy ? 'disabled' : ''}>删除镜像</button>
+              <button class="small danger" data-remove-image="${escapeHtml(item.id)}" ${busy ? 'disabled' : ''}>删除镜像</button>
             </div>
           </article>`,
         )

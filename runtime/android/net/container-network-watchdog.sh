@@ -14,12 +14,16 @@ LOG_FILE="${ACHOST_NET_LOG:-/data/local/tmp/achost-network-watchdog.log}"
 PID_FILE="${ACHOST_NET_PID:-/data/local/tmp/achost-network-watchdog.pid}"
 NAT_MANAGER="${ACHOST_NAT_MANAGER:-$SCRIPT_DIR/container-nat-manager.sh}"
 DRY_RUN="${ACHOST_DRY_RUN:-0}"
+RETURN_RULE_PRIORITY="${ACHOST_CONTAINER_RETURN_RULE_PRIORITY:-11999}"
 
 case "$WATCH_INTERVAL" in
     ''|*[!0-9]*) WATCH_INTERVAL=5 ;;
 esac
 case "$REPAIR_INTERVAL" in
     ''|*[!0-9]*) REPAIR_INTERVAL=30 ;;
+esac
+case "$RETURN_RULE_PRIORITY" in
+    ''|*[!0-9]*) RETURN_RULE_PRIORITY=11999 ;;
 esac
 
 LOG_DIR="${LOG_FILE%/*}"
@@ -84,6 +88,12 @@ resolve_uplink() {
     done
 }
 
+ip_rule_present() {
+    rule_priority="$1"
+    rule_needle="$2"
+    ip rule show | grep -F "$rule_needle" | awk -v priority="$rule_priority:" '$1 == priority { found = 1 } END { exit found ? 0 : 1 }'
+}
+
 if [ -r "$PID_FILE" ]; then
     OLD_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
     case "$OLD_PID" in
@@ -143,27 +153,33 @@ while :; do
     UPLINK_RESOLVED="$(resolve_uplink 2>/dev/null || true)"
     if [ -z "$UPLINK_RESOLVED" ]; then
         if [ "$LAST_WAIT" != "missing-uplink" ]; then
-            log_msg "waiting: cannot determine uplink for target $TARGET"
+            log_msg "waiting: cannot determine uplink for target $TARGET; repairing host route only"
             LAST_WAIT="missing-uplink"
         fi
-        sleep "$WATCH_INTERVAL"
-        continue
+    else
+        LAST_WAIT=""
     fi
 
-    LAST_WAIT=""
-    STATE="$CONTAINER_BRIDGE|$SUBNET_RESOLVED|$UPLINK_RESOLVED|$IPTABLES"
+    UPLINK_LABEL="${UPLINK_RESOLVED:-unavailable}"
+    RETURN_RULE_NEEDLE="to $SUBNET_RESOLVED lookup main"
+    if ! ip_rule_present "$RETURN_RULE_PRIORITY" "$RETURN_RULE_NEEDLE"; then
+        log_msg "repair: missing ip rule priority=$RETURN_RULE_PRIORITY $RETURN_RULE_NEEDLE"
+        CYCLES="$REPAIR_INTERVAL"
+    fi
+
+    STATE="$CONTAINER_BRIDGE|$SUBNET_RESOLVED|$UPLINK_LABEL|$IPTABLES"
     if [ "$STATE" != "$LAST_STATE" ]; then
-        log_msg "state: bridge=$CONTAINER_BRIDGE subnet=$SUBNET_RESOLVED uplink=$UPLINK_RESOLVED iptables=${IPTABLES:-auto}"
+        log_msg "state: bridge=$CONTAINER_BRIDGE subnet=$SUBNET_RESOLVED uplink=$UPLINK_LABEL iptables=${IPTABLES:-auto}"
         LAST_STATE="$STATE"
         CYCLES="$REPAIR_INTERVAL"
     fi
 
     if [ "$CYCLES" -ge "$REPAIR_INTERVAL" ]; then
         if CONTAINER_BRIDGE="$CONTAINER_BRIDGE" DOCKER_BRIDGE="$CONTAINER_BRIDGE" DOCKER_SUBNET="$SUBNET_RESOLVED" UPLINK="$UPLINK_RESOLVED" TARGET="$TARGET" IPTABLES="$IPTABLES" ACHOST_DRY_RUN="$DRY_RUN" "$NAT_MANAGER" >> "$LOG_FILE" 2>&1; then
-            log_msg "reconcile ok: bridge=$CONTAINER_BRIDGE uplink=$UPLINK_RESOLVED"
+            log_msg "reconcile ok: bridge=$CONTAINER_BRIDGE uplink=$UPLINK_LABEL"
         else
             rc=$?
-            log_msg "reconcile failed: bridge=$CONTAINER_BRIDGE uplink=$UPLINK_RESOLVED exit=$rc"
+            log_msg "reconcile failed: bridge=$CONTAINER_BRIDGE uplink=$UPLINK_LABEL exit=$rc"
         fi
         CYCLES=0
     fi

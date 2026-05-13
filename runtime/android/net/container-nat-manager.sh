@@ -226,32 +226,44 @@ cleanup_bridge_forward_rules() {
     done
 }
 
-ensure_policy_rules() {
+ensure_return_policy_rule() {
+    ensure_policy_subnet="$1"
+
+    [ "$POLICY_RULES" = "1" ] || return 0
+    ensure_ip_rule "$RETURN_RULE_PRIORITY" "to $ensure_policy_subnet lookup main" to "$ensure_policy_subnet" lookup main
+}
+
+ensure_source_policy_rule() {
     ensure_policy_subnet="$1"
     ensure_policy_uplink="$2"
 
     [ "$POLICY_RULES" = "1" ] || return 0
-    ensure_ip_rule "$RETURN_RULE_PRIORITY" "to $ensure_policy_subnet lookup main" to "$ensure_policy_subnet" lookup main
     ensure_ip_rule "$SOURCE_RULE_PRIORITY" "from $ensure_policy_subnet lookup $ensure_policy_uplink" from "$ensure_policy_subnet" lookup "$ensure_policy_uplink"
 }
 
 have ip || fail "ip command not found"
 require_bridge
 IPTABLES_BIN="$(pick_iptables)" || fail "iptables command not found"
-UPLINK_RESOLVED="$(resolve_uplink)"
-[ -n "$UPLINK_RESOLVED" ] || fail "cannot detect uplink interface; set UPLINK"
 DOCKER_SUBNET_RESOLVED="$(resolve_docker_subnet)"
 
 log "container_bridge=$CONTAINER_BRIDGE"
 log "docker_bridge=$CONTAINER_BRIDGE"
 log "docker_subnet=$DOCKER_SUBNET_RESOLVED"
-log "uplink=$UPLINK_RESOLVED"
 log "iptables=$IPTABLES_BIN"
 log "policy_rules=$POLICY_RULES return_rule_priority=$RETURN_RULE_PRIORITY source_rule_priority=$SOURCE_RULE_PRIORITY"
 
 set_sysctl_value net.ipv4.ip_forward 1
 set_sysctl_value net.ipv6.conf.all.forwarding 1
-ensure_policy_rules "$DOCKER_SUBNET_RESOLVED" "$UPLINK_RESOLVED"
+ensure_return_policy_rule "$DOCKER_SUBNET_RESOLVED"
+
+UPLINK_RESOLVED="$(resolve_uplink)"
+if [ -z "$UPLINK_RESOLVED" ]; then
+    log "warn: cannot detect uplink interface; host access rule repaired only"
+    log "container host-route reconciliation complete"
+    exit 0
+fi
+log "uplink=$UPLINK_RESOLVED"
+ensure_source_policy_rule "$DOCKER_SUBNET_RESOLVED" "$UPLINK_RESOLVED"
 cleanup_bridge_forward_rules
 
 ensure_rule filter FORWARD -i "$CONTAINER_BRIDGE" -o "$UPLINK_RESOLVED" -j ACCEPT

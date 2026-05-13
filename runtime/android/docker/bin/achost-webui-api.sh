@@ -30,7 +30,8 @@ ACHOST_CONFIG="${ACHOST_CONFIG:-$ACHOST_VAR/config}"
 AUTOSTART_FILE="$ACHOST_CONFIG/docker.autostart"
 
 json_escape() {
-    printf '%s' "$1" | LC_ALL=C tr -d '\001-\010\013\014\016-\037' | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' '
+    json_control_chars="$(printf '\001\002\003\004\005\006\007\010\011\013\014\015\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037')"
+    printf '%s' "$1" | LC_ALL=C tr -d "$json_control_chars" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' '
 }
 
 json_string() {
