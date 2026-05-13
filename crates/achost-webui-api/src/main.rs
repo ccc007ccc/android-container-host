@@ -167,12 +167,16 @@ fn dispatch(env: &RuntimeEnv, args: &[String]) -> Value {
         Some("settings") => settings_json(env),
         Some("set-autostart") => set_autostart(env, args.get(1).map(String::as_str).unwrap_or("")),
         Some("check") => check_json(env),
-        Some("start-docker") => {
-            run_and_report("start-docker", &env.bin.join("achost-docker-start.sh"), &[])
-        }
-        Some("stop-docker") => {
-            run_and_report("stop-docker", &env.bin.join("achost-docker-stop.sh"), &[])
-        }
+        Some("start-docker") => run_and_report(
+            "start-docker",
+            &env.bin.join("achost-docker-runtime"),
+            &["start".to_string()],
+        ),
+        Some("stop-docker") => run_and_report(
+            "stop-docker",
+            &env.bin.join("achost-docker-runtime"),
+            &["stop".to_string()],
+        ),
         Some("list-containers") => list_containers(env),
         Some("add-container") => add_container(
             env,

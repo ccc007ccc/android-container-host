@@ -34,8 +34,6 @@ COMMON_RUNTIME_FILES = (
     (SCRIPT_ROOT / "collect-logs.sh", "achost/bin/collect-logs.sh"),
 )
 DOCKER_RUNTIME_FILES = (
-    (RUNTIME_ROOT / "docker" / "bin" / "achost-docker-start.sh", "achost/bin/achost-docker-start.sh"),
-    (RUNTIME_ROOT / "docker" / "bin" / "achost-docker-stop.sh", "achost/bin/achost-docker-stop.sh"),
     (RUNTIME_ROOT / "docker" / "bin" / "achost-webui-api.sh", "achost/bin/achost-webui-api.sh"),
     (SCRIPT_ROOT / "docker" / "runtime-smoke-docker.sh", "achost/bin/runtime-smoke-docker.sh"),
     (SCRIPT_ROOT / "docker" / "runtime-docker-feature-test.sh", "achost/bin/runtime-docker-feature-test.sh"),
@@ -1141,7 +1139,7 @@ chmod 0755 "$DEST"/lxc/bin/* 2>/dev/null || true
 
 printf 'ACHOST runtime installed to %s\n' "$DEST"
 printf 'Run %s/bin/achost-container-validate.sh to check installed Docker/LXC userland.\n' "$DEST"
-printf 'Run %s/bin/achost-docker-start.sh after installing a Docker userland asset.\n' "$DEST"
+printf 'Run %s/bin/achost-docker-runtime start after installing a Docker userland asset.\n' "$DEST"
 printf 'For plain docker in this shell: export PATH=%s/wrappers:%s/bin:$PATH\n' "$DEST" "$DEST"
 """
 
@@ -1195,8 +1193,8 @@ fi
         docker_start = ksu_docker_wrapper_install_script(install_prefix_for_mode("kernelsu-module", spec), spec) + f"""
 AUTOSTART_FILE="$ACHOST_CONFIG/docker.autostart"
 [ -e "$AUTOSTART_FILE" ] || printf '{seed_autostart}\n' > "$AUTOSTART_FILE" 2>/dev/null || true
-if [ "$(cat "$AUTOSTART_FILE" 2>/dev/null || printf '0')" = "1" ] && [ -x "$ACHOST/bin/achost-docker-start.sh" ]; then
-    "$ACHOST/bin/achost-docker-start.sh" >> "$ACHOST_LOG_DIR/dockerd-start.log" 2>&1 &
+if [ "$(cat "$AUTOSTART_FILE" 2>/dev/null || printf '0')" = "1" ] && [ -x "$ACHOST/bin/achost-docker-runtime" ]; then
+    "$ACHOST/bin/achost-docker-runtime" start >> "$ACHOST_LOG_DIR/dockerd-start.log" 2>&1 &
 fi
 """
     return f"""#!/system/bin/sh
@@ -1262,8 +1260,8 @@ def uninstall_script(spec: ModuleSpec) -> str:
     docker_cleanup = ""
     if spec.include_docker:
         docker_stop = """
-if [ -x "$ACHOST/bin/achost-docker-stop.sh" ]; then
-    "$ACHOST/bin/achost-docker-stop.sh" >/dev/null 2>&1 || true
+if [ -x "$ACHOST/bin/achost-docker-runtime" ]; then
+    "$ACHOST/bin/achost-docker-runtime" stop >/dev/null 2>&1 || true
 fi
 """
         docker_cleanup = """

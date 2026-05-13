@@ -124,7 +124,7 @@ bin/achost runtime-test \
 
 Compose, buildx, and BuildKit are explicit optional assets. Use `--compose-asset` for the Docker Compose v2 plugin, `--buildx-asset` for the Docker buildx plugin, and `--buildkit-asset` for a BuildKit tarball containing `buildctl` and `buildkitd`. Compose/buildx are installed under `achost/etc/docker/cli-plugins/` plus standalone fallbacks in `achost/bin`; BuildKit binaries are installed in `achost/bin`.
 
-On Android 16/lmi, Docker 29 needs a writable `/run`. `achost-docker-start.sh` starts Docker inside an ACHOST-managed chroot under `/data/adb/achost/var/chroot`, so the system rootfs is not remounted or modified. `--cgroup-mode v2` also changes the runtime cgroup layout by exposing the host cgroup2 tree in the chroot; test v2 packages under a separate prefix before replacing a stable v1 package.
+On Android 16/lmi, Docker 29 needs a writable `/run`. `achost-docker-runtime start` runs Docker in native mode with an ACHOST-managed native root under `/data/adb/achost/var/native-root`, exposes `/run/docker.sock` and `/var/run -> /run` inside the daemon namespace, and does not remount the Android rootfs. `--cgroup-mode v2` changes the runtime cgroup layout; test v2 packages under a separate prefix before replacing a stable v1 package.
 
 `runtime-test.sh` starts Docker, runs validation, and stops Docker afterward. The default Docker smoke mode is local-only: it imports a tiny image from the packaged Docker binary and runs it with `--network none`, so it does not depend on Docker Hub. Use `DOCKER_SMOKE_MODE=local-bridge` to also exercise bridge/veth attachment without external traffic, `DOCKER_SMOKE_MODE=publish` to verify real host published-port traffic through `docker-proxy`, and `DOCKER_SMOKE_MODE=full` only when registry access and image pulls are expected to work.
 
@@ -132,8 +132,7 @@ On-device helpers installed under `/data/adb/achost/bin`:
 
 ```bash
 achost-container-validate.sh
-achost-docker-start.sh
-achost-docker-stop.sh
+achost-docker-runtime  # use: achost-docker-runtime start|stop
 achost-lxc-validate.sh
 ```
 

@@ -20,17 +20,18 @@ run_script() {
     title="$1"
     script="$2"
     required="$3"
+    shift 3
 
     section "$title"
     if [ ! -x "$script" ]; then
-        printf 'missing script: %s\n' "$script"
+        printf 'missing executable: %s\n' "$script"
         if [ "$required" = "1" ]; then
             FAILURES=$((FAILURES + 1))
         fi
         return 0
     fi
 
-    OUT_DIR="$OUT_DIR" "$script" 2>&1
+    OUT_DIR="$OUT_DIR" "$script" "$@" 2>&1
     rc=$?
     if [ "$rc" -ne 0 ]; then
         printf 'FAIL: %s exit=%s\n' "$title" "$rc"
@@ -86,11 +87,11 @@ fi
 
 if [ "$MODE" = "all" ] || [ "$MODE" = "docker" ]; then
     run_script "protect container daemons" "$SCRIPT_DIR/protect-container-daemons.sh" 0
-    run_script "Docker daemon start" "$SCRIPT_DIR/achost-docker-start.sh" 1
+    run_script "Docker daemon start" "$SCRIPT_DIR/achost-docker-runtime" 1 start
     run_script "container network reconcile" "$SCRIPT_DIR/container-nat-manager.sh" 0
     run_script "Docker runtime smoke" "$SCRIPT_DIR/runtime-smoke-docker.sh" 1
     run_script "network debug after Docker" "$SCRIPT_DIR/runtime-net-debug.sh" 0
-    run_script "Docker daemon stop" "$SCRIPT_DIR/achost-docker-stop.sh" 0
+    run_script "Docker daemon stop" "$SCRIPT_DIR/achost-docker-runtime" 0 stop
 fi
 
 if [ "$MODE" = "all" ] || [ "$MODE" = "lxc" ]; then

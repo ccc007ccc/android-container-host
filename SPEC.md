@@ -1300,8 +1300,8 @@ achost/
     runc
     achost-container-env.sh
     achost-container-validate.sh
-    achost-docker-start.sh
-    achost-docker-stop.sh
+    achost-docker-runtime
+    achost-webui-api
     achost-lxc-validate.sh
   etc/docker/daemon.json
   etc/docker/cli-plugins/docker-compose  # only when present in the Docker asset
@@ -1316,9 +1316,9 @@ Android 侧启动要求：
 
 1. `achost-container-env.sh` 统一设置 `PATH`、`DOCKER_HOST`、containerd socket、data-root、exec-root、log 路径。
 2. `achost-container-validate.sh` 只做 presence/路径/内核运行态检查，不启动容器。
-3. `achost-docker-start.sh` 必须以 root 运行，创建 ACHOST 目录，启动 containerd 和 dockerd，并触发网络守护。
-4. Docker 29 等新版本若硬编码访问 `/run`，启动脚本必须优先使用 `/data/adb/achost/var/chroot` 提供可写 `/run`，不得 remount Android 根目录。
-5. `achost-docker-stop.sh` 只停止 ACHOST pidfile 记录的 dockerd/containerd，并清理 ACHOST chroot bind mounts。
+3. `achost-docker-runtime start` 必须以 root 运行，创建 ACHOST 目录，启动 containerd 和 dockerd，并触发网络守护。
+4. Docker 29 等新版本若硬编码访问 `/run`，native runtime 必须通过 `/data/adb/achost/var/native-root` 提供可写 `/run` 和 `/var/run -> /run`，不得 remount Android 根目录。
+5. `achost-docker-runtime stop` 只停止 ACHOST pidfile 记录的 dockerd/containerd/supervisor，并清理 ACHOST sockets 与临时 cgroup mounts。
 6. `runtime-test.sh`、`runtime-net-debug.sh`、`collect-logs.sh` 必须收集 validation、socket、daemon 日志和 watchdog 状态。
 
 LXC 策略：
