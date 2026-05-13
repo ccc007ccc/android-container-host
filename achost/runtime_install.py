@@ -407,13 +407,94 @@ def write_docker_wrappers(root: Path, mode: str, install_prefix: str, spec: Modu
     return files
 
 
+def docker_wrapper_rewrite_functions() -> str:
+    return r'''
+docker_socket_path() {
+    case "${DOCKER_HOST:-}" in
+        unix://*) printf '%s' "${DOCKER_HOST#unix://}" ;;
+        *) printf '%s' "$ACHOST/var/run/docker.sock" ;;
+    esac
+}
+
+rewrite_docker_mount() {
+    docker_socket="$(docker_socket_path)"
+    case "$1" in
+        /var/run/docker.sock)
+            printf '%s' "$docker_socket"
+            ;;
+        /var/run/docker.sock:*)
+            printf '%s:%s' "$docker_socket" "${1#*:}"
+            ;;
+        type=bind,source=/var/run/docker.sock,*)
+            printf 'type=bind,source=%s,%s' "$docker_socket" "${1#type=bind,source=/var/run/docker.sock,}"
+            ;;
+        type=bind,src=/var/run/docker.sock,*)
+            printf 'type=bind,src=%s,%s' "$docker_socket" "${1#type=bind,src=/var/run/docker.sock,}"
+            ;;
+        *)
+            printf '%s' "$1"
+            ;;
+    esac
+}
+
+quote_docker_arg() {
+    printf "'"
+    printf '%s' "$1" | sed "s/'/'\\\\''/g"
+    printf "'"
+}
+
+append_docker_arg() {
+    docker_exec_args="$docker_exec_args $(quote_docker_arg "$1")"
+}
+
+exec_docker() {
+    case "${1:-}" in
+        run|create) ;;
+        *) exec "$ACHOST/bin/docker" "$@" ;;
+    esac
+    docker_exec_args=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -v|--volume|--mount)
+                docker_opt="$1"
+                shift
+                append_docker_arg "$docker_opt"
+                if [ "$#" -gt 0 ]; then
+                    append_docker_arg "$(rewrite_docker_mount "$1")"
+                else
+                    break
+                fi
+                ;;
+            --volume=*)
+                docker_mount_value="${1#--volume=}"
+                append_docker_arg "--volume=$(rewrite_docker_mount "$docker_mount_value")"
+                ;;
+            --mount=*)
+                docker_mount_value="${1#--mount=}"
+                append_docker_arg "--mount=$(rewrite_docker_mount "$docker_mount_value")"
+                ;;
+            -v/*)
+                docker_mount_value="${1#-v}"
+                append_docker_arg "-v$(rewrite_docker_mount "$docker_mount_value")"
+                ;;
+            *)
+                append_docker_arg "$1"
+                ;;
+        esac
+        shift || break
+    done
+    eval "exec \"\$ACHOST/bin/docker\" $docker_exec_args"
+}
+'''
+
+
 def manual_docker_wrapper() -> str:
-    return '''#!/system/bin/sh
+    return f'''#!/system/bin/sh
 set -u
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-ACHOST="${ACHOST:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}"
+ACHOST="${{ACHOST:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}}"
 . "$ACHOST/bin/achost-container-env.sh"
-exec "$ACHOST/bin/docker" "$@"
+{docker_wrapper_rewrite_functions()}exec_docker "$@"
 '''
 
 
@@ -435,7 +516,7 @@ if [ -r "$ACHOST/bin/achost-container-env.sh" ]; then
     printf 'ACHost env not found\n' >&2
     exit 1
 fi
-exec "$ACHOST/bin/docker" "$@"
+{docker_wrapper_rewrite_functions()}exec_docker "$@"
 '''
 
 

@@ -321,6 +321,28 @@ run_docker_target() {
     run_and_report "$action" "$DOCKER" "$action" "$target"
 }
 
+docker_socket_path() {
+    case "${DOCKER_HOST:-}" in
+        unix://*) printf '%s' "${DOCKER_HOST#unix://}" ;;
+        *) printf '%s' "$ACHOST_RUN/docker.sock" ;;
+    esac
+}
+
+normalize_mount_item() {
+    docker_socket="$(docker_socket_path)"
+    case "$1" in
+        /var/run/docker.sock)
+            printf '%s' "$docker_socket"
+            ;;
+        /var/run/docker.sock:*)
+            printf '%s:%s' "$docker_socket" "${1#*:}"
+            ;;
+        *)
+            printf '%s' "$1"
+            ;;
+    esac
+}
+
 add_container() {
     name="$1"
     image="$2"
@@ -346,7 +368,7 @@ add_container() {
         [ -n "$item" ] && set -- "$@" -e "$item"
     done
     for item in $mounts; do
-        [ -n "$item" ] && set -- "$@" -v "$item"
+        [ -n "$item" ] && set -- "$@" -v "$(normalize_mount_item "$item")"
     done
     IFS="$old_ifs"
     set -- "$@" "$image"

@@ -112,4 +112,7 @@ unmount_devices_cgroup
 case "$DOCKER_HOST" in
     unix://*) rm -f "${DOCKER_HOST#unix://}" 2>/dev/null || true ;;
 esac
+case "${ACHOST_DOCKER_COMPAT_HOST:-}" in
+    unix://*) rm -f "${ACHOST_DOCKER_COMPAT_HOST#unix://}" 2>/dev/null || true ;;
+esac
 rm -f "$CONTAINERD_ADDRESS" 2>/dev/null || true

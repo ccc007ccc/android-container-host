@@ -1,7 +1,9 @@
 import hashlib
 import io
 import json
+import os
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -220,11 +222,81 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("/data/adb/ksu/bin", customize_text)
             self.assertIn("ACHOST_DOCKER_WRAPPER", service_text)
             self.assertIn("ACHOST_DOCKER_WRAPPER", customize_text)
+            self.assertIn("rewrite_docker_mount", service_text)
+            self.assertIn("rewrite_docker_mount", customize_text)
             self.assertIn("grep -q 'ACHOST_DOCKER_WRAPPER'", uninstall_text)
             self.assertIn("rm -f /data/adb/ksu/bin/docker", uninstall_text)
             self.assertEqual(webui_config["api"], "/data/adb/modules/achost-docker/achost/bin/achost-webui-api.sh")
             self.assertNotIn("lxc", manifest["included_categories"])
             self.assertNotIn("supervisor", manifest["included_categories"])
+
+    def test_docker_wrapper_rewrites_default_socket_mounts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "manual"
+            generate_runtime_package(output, mode="manual")
+            fake_docker = output / "achost" / "bin" / "docker"
+            fake_docker.write_text("#!/usr/bin/env sh\nprintf '%s\\n' \"$@\"\n")
+            fake_docker.chmod(0o755)
+
+            env = os.environ.copy()
+            env["DOCKER_HOST"] = "unix:///data/adb/achost/run/docker.sock"
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(output / "achost" / "wrappers" / "docker"),
+                    "run",
+                    "--name",
+                    "portainer",
+                    "-v",
+                    "/var/run/docker.sock:/var/run/docker.sock",
+                    "--mount",
+                    "type=bind,source=/var/run/docker.sock,target=/docker.sock",
+                    "6053537/portainer-ce",
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+
+            args = result.stdout.splitlines()
+            self.assertIn("/data/adb/achost/run/docker.sock:/var/run/docker.sock", args)
+            self.assertIn("type=bind,source=/data/adb/achost/run/docker.sock,target=/docker.sock", args)
+            self.assertNotIn("/var/run/docker.sock:/var/run/docker.sock", args)
+            self.assertNotIn("type=bind,source=/var/run/docker.sock,target=/docker.sock", args)
+
+    def test_webui_api_rewrites_default_socket_bind_mount(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "docker"
+            generate_runtime_package(output, mode="kernelsu-module", module_target="docker")
+            fake_docker = output / "achost" / "bin" / "docker"
+            fake_docker.write_text("#!/usr/bin/env sh\nprintf '%s\\n' \"$@\"\n")
+            fake_docker.chmod(0o755)
+
+            env = os.environ.copy()
+            env["DOCKER_HOST"] = "unix:///data/adb/achost/run/docker.sock"
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(output / "achost" / "bin" / "achost-webui-api.sh"),
+                    "add-container",
+                    "portainer",
+                    "6053537/portainer-ce",
+                    "",
+                    "",
+                    "/var/run/docker.sock:/var/run/docker.sock",
+                    "bridge",
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertIn("/data/adb/achost/run/docker.sock:/var/run/docker.sock", payload["output"])
+            self.assertNotIn("\n/var/run/docker.sock:/var/run/docker.sock\n", payload["output"])
 
     def test_kernelsu_lxc_module_depends_on_base_and_excludes_docker(self):
         with tempfile.TemporaryDirectory() as tmp:

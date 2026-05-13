@@ -613,6 +613,51 @@ imports = []
 EOF
 }
 
+prepare_docker_compat_socket() {
+    case "${ACHOST_DOCKER_COMPAT_HOST:-}" in
+        ''|0|none)
+            ACHOST_DOCKER_COMPAT_HOST=""
+            return 0
+            ;;
+        unix://*) ;;
+        *) return 0 ;;
+    esac
+    compat_socket="${ACHOST_DOCKER_COMPAT_HOST#unix://}"
+    case "$DOCKER_HOST" in
+        unix://*) primary_socket="${DOCKER_HOST#unix://}" ;;
+        *) primary_socket="" ;;
+    esac
+    [ -n "$compat_socket" ] || { ACHOST_DOCKER_COMPAT_HOST=""; return 0; }
+    [ "$compat_socket" != "$primary_socket" ] || { ACHOST_DOCKER_COMPAT_HOST=""; return 0; }
+    compat_dir="${compat_socket%/*}"
+    compat_root=""
+    if [ "$ACHOST_USE_CHROOT" = "1" ]; then
+        compat_root="$ACHOST_CHROOT"
+    elif [ "$ACHOST_RUNTIME_MODE" = "native" ]; then
+        compat_root="$ACHOST_NATIVE_ROOT"
+    fi
+    if [ -n "$compat_root" ]; then
+        case "$compat_socket" in
+            /var/run/*)
+                mkdir -p "$compat_root/run" "$compat_root/var" 2>/dev/null || true
+                ln -sfn /run "$compat_root/var/run" 2>/dev/null || true
+                rm -f "$compat_root/run/${compat_socket#/var/run/}" 2>/dev/null || true
+                ;;
+            /*)
+                mkdir -p "$compat_root$compat_dir" 2>/dev/null || true
+                rm -f "$compat_root$compat_socket" 2>/dev/null || true
+                ;;
+        esac
+        return 0
+    fi
+    if ! mkdir -p "$compat_dir" 2>/dev/null; then
+        printf 'warning: unable to create Docker compatibility socket dir: %s\n' "$compat_dir" >&2
+        ACHOST_DOCKER_COMPAT_HOST=""
+        return 0
+    fi
+    rm -f "$compat_socket" 2>/dev/null || true
+}
+
 start_containerd_daemon() {
     if [ "$ACHOST_USE_CHROOT" = "1" ]; then
         start_daemon_command containerd "$ACHOST_CONTAINERD_PID" "$ACHOST_CONTAINERD_LOG" "$ACHOST_CHROOT" \
@@ -625,45 +670,34 @@ start_containerd_daemon() {
 
 start_dockerd_external_containerd() {
     dockerd_pid_target="$ACHOST_DOCKERD_LAUNCH_PID"
+    set -- "$ACHOST_BIN/dockerd" \
+        --config-file "$ACHOST_DOCKERD_CONFIG" \
+        --data-root "$ACHOST_DOCKER_ROOT" \
+        --exec-root "$ACHOST_DOCKER_EXEC_ROOT" \
+        --pidfile "$ACHOST_DOCKERD_PID" \
+        --host "$DOCKER_HOST"
+    [ -n "${ACHOST_DOCKER_COMPAT_HOST:-}" ] && set -- "$@" --host "$ACHOST_DOCKER_COMPAT_HOST"
+    set -- "$@" --containerd "$CONTAINERD_ADDRESS"
     if [ "$ACHOST_USE_CHROOT" = "1" ]; then
-        start_daemon_command dockerd "$dockerd_pid_target" "$ACHOST_DOCKERD_LOG" "$ACHOST_CHROOT" \
-            "$ACHOST_BIN/dockerd" \
-            --config-file "$ACHOST_DOCKERD_CONFIG" \
-            --data-root "$ACHOST_DOCKER_ROOT" \
-            --exec-root "$ACHOST_DOCKER_EXEC_ROOT" \
-            --pidfile "$ACHOST_DOCKERD_PID" \
-            --host "$DOCKER_HOST" \
-            --containerd "$CONTAINERD_ADDRESS"
+        start_daemon_command dockerd "$dockerd_pid_target" "$ACHOST_DOCKERD_LOG" "$ACHOST_CHROOT" "$@"
     else
-        start_daemon_command dockerd "$dockerd_pid_target" "$ACHOST_DOCKERD_LOG" - \
-            "$ACHOST_BIN/dockerd" \
-            --config-file "$ACHOST_DOCKERD_CONFIG" \
-            --data-root "$ACHOST_DOCKER_ROOT" \
-            --exec-root "$ACHOST_DOCKER_EXEC_ROOT" \
-            --pidfile "$ACHOST_DOCKERD_PID" \
-            --host "$DOCKER_HOST" \
-            --containerd "$CONTAINERD_ADDRESS"
+        start_daemon_command dockerd "$dockerd_pid_target" "$ACHOST_DOCKERD_LOG" - "$@"
     fi
 }
 
 start_dockerd_managed_containerd() {
     dockerd_pid_target="$ACHOST_DOCKERD_LAUNCH_PID"
+    set -- "$ACHOST_BIN/dockerd" \
+        --config-file "$ACHOST_DOCKERD_CONFIG" \
+        --data-root "$ACHOST_DOCKER_ROOT" \
+        --exec-root "$ACHOST_DOCKER_EXEC_ROOT" \
+        --pidfile "$ACHOST_DOCKERD_PID" \
+        --host "$DOCKER_HOST"
+    [ -n "${ACHOST_DOCKER_COMPAT_HOST:-}" ] && set -- "$@" --host "$ACHOST_DOCKER_COMPAT_HOST"
     if [ "$ACHOST_USE_CHROOT" = "1" ]; then
-        start_daemon_command dockerd "$dockerd_pid_target" "$ACHOST_DOCKERD_LOG" "$ACHOST_CHROOT" \
-            "$ACHOST_BIN/dockerd" \
-            --config-file "$ACHOST_DOCKERD_CONFIG" \
-            --data-root "$ACHOST_DOCKER_ROOT" \
-            --exec-root "$ACHOST_DOCKER_EXEC_ROOT" \
-            --pidfile "$ACHOST_DOCKERD_PID" \
-            --host "$DOCKER_HOST"
+        start_daemon_command dockerd "$dockerd_pid_target" "$ACHOST_DOCKERD_LOG" "$ACHOST_CHROOT" "$@"
     else
-        start_daemon_command dockerd "$dockerd_pid_target" "$ACHOST_DOCKERD_LOG" - \
-            "$ACHOST_BIN/dockerd" \
-            --config-file "$ACHOST_DOCKERD_CONFIG" \
-            --data-root "$ACHOST_DOCKER_ROOT" \
-            --exec-root "$ACHOST_DOCKER_EXEC_ROOT" \
-            --pidfile "$ACHOST_DOCKERD_PID" \
-            --host "$DOCKER_HOST"
+        start_daemon_command dockerd "$dockerd_pid_target" "$ACHOST_DOCKERD_LOG" - "$@"
     fi
 }
 
@@ -719,11 +753,12 @@ else
 fi
 
 write_dockerd_config
+prepare_docker_compat_socket
 
 if dockerd_running; then
     printf 'dockerd already running pid=%s\n' "$(dockerd_pid_for_display)"
 else
-    rm -f "$ACHOST_DOCKERD_PID" "$ACHOST_DOCKERD_LAUNCH_PID" "${DOCKER_HOST#unix://}" 2>/dev/null || true
+    rm -f "$ACHOST_DOCKERD_PID" "$ACHOST_DOCKERD_LAUNCH_PID" "${DOCKER_HOST#unix://}" "${ACHOST_DOCKER_COMPAT_HOST#unix://}" 2>/dev/null || true
     cleanup_stale_docker_iptables
     if [ "$ACHOST_EXTERNAL_CONTAINERD" = "1" ]; then
         start_dockerd_external_containerd
@@ -749,5 +784,6 @@ else
 fi
 
 printf 'DOCKER_HOST=%s\n' "$DOCKER_HOST"
+[ -n "${ACHOST_DOCKER_COMPAT_HOST:-}" ] && printf 'DOCKER_COMPAT_HOST=%s\n' "$ACHOST_DOCKER_COMPAT_HOST"
 printf 'dockerd_log=%s\n' "$ACHOST_DOCKERD_LOG"
 printf 'containerd_log=%s\n' "$ACHOST_CONTAINERD_LOG"
