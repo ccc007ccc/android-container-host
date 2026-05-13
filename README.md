@@ -85,13 +85,13 @@ bin/achost apply-patches \
   --kernel-tree /home/ccc007/Android/Kernel/android_kernel_xiaomi_sm8250 \
   --dry-run
 
-runtime/android/net/container-nat-manager.sh
-runtime/android/net/container-network-watchdog.sh
+achost-runtime-core net-reconcile
+achost-runtime-core net-watchdog
+achost-runtime-core protect-daemons
 scripts/runtime-net-debug.sh
 scripts/docker/runtime-smoke-docker.sh
 scripts/verify-lxc-checkconfig.sh
 scripts/runtime-smoke-lxc.sh
-runtime/android/memory/protect-container-daemons.sh
 
 bin/achost runtime-install \
   --mode manual \
@@ -132,6 +132,7 @@ On-device helpers installed under `/data/adb/achost/bin`:
 
 ```bash
 achost-container-validate.sh
+achost-runtime-core    # use: detect-uplink|net-reconcile|net-watchdog|protect-daemons
 achost-docker-runtime  # use: achost-docker-runtime start|stop
 achost-lxc-validate.sh
 ```

@@ -332,22 +332,14 @@ android-container-host/
         android-common.conf
         templates/
 
-      net/
-        container-netd-compat.sh
-        container-nat-manager.sh
-        detect-uplink.sh
-        container-network-watchdog.sh
-
-      memory/
-        protect-container-daemons.sh
-        oom-score-policy.sh
-        lmkd-debug.sh
-
       sepolicy/
         README.md
         container_host.te.example
         file_contexts.example
         service_contexts.example
+
+  crates/
+    achost-runtime-core/
 
   scripts/
     detect-kernel.sh
@@ -1131,10 +1123,10 @@ Android 10+ 推荐使用：
 Docker host 网络能用，但 bridge 不能访问外网。
 ```
 
-项目必须提供一个独立脚本：
+项目必须由 Rust runtime core 提供独立子命令：
 
 ```text
-runtime/android/net/container-nat-manager.sh
+achost-runtime-core net-reconcile
 ```
 
 功能：
@@ -1210,14 +1202,9 @@ KernelSU / ReSukiSU 模块模式必须提供一个常驻但轻量的网络守护
 
 实现要求：
 
-1. 新增守护脚本：
-
-   ```text
-   runtime/android/net/container-network-watchdog.sh
-   ```
-
-2. 守护脚本调用 `container-nat-manager.sh`，不能复制另一套 iptables 逻辑。
-3. `container-nat-manager.sh` 继续作为一次性幂等修复器，可手动执行，也可被守护循环执行。
+1. 网络守护由 `achost-runtime-core net-watchdog` 提供。
+2. 守护逻辑调用同一 Rust reconcile 实现，不能复制另一套 iptables 逻辑。
+3. `achost-runtime-core net-reconcile` 继续作为一次性幂等修复器，可手动执行，也可被守护循环执行。
 4. 变量约定：
 
    ```text
@@ -2102,7 +2089,7 @@ host 网络能用但 bridge 不能出网
 交付：
 
 ```text
-runtime/android/net/container-nat-manager.sh
+achost-runtime-core net-reconcile
 scripts/runtime-net-debug.sh
 ```
 
@@ -2133,7 +2120,7 @@ scripts/runtime-smoke-lxc.sh
 交付：
 
 ```text
-runtime/android/memory/protect-container-daemons.sh
+achost-runtime-core protect-daemons
 docs/lmkd-memory-guide.md
 ```
 

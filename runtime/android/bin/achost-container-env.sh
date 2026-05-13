@@ -13,7 +13,7 @@ fi
 
 ACHOST_BASE="${ACHOST_BASE:-}"
 if [ -z "$ACHOST_BASE" ]; then
-    if [ -x "$ACHOST/bin/achost-supervise" ] || [ -x "$ACHOST/bin/container-network-watchdog.sh" ]; then
+    if [ -x "$ACHOST/bin/achost-supervise" ] || [ -x "$ACHOST/bin/achost-runtime-core" ]; then
         ACHOST_BASE="$ACHOST"
     elif [ -d /data/adb/modules/achost-base/achost ]; then
         ACHOST_BASE=/data/adb/modules/achost-base/achost

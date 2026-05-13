@@ -32,7 +32,7 @@ runtime:
   protect_daemons_from_lmkd: true
   selinux_mode: detect
   docker_daemon_config: runtime/android/docker/etc/daemon.cgroup-v1.json
-  nat_manager: runtime/android/net/container-nat-manager.sh
+  nat_manager: achost-runtime-core net-reconcile
 known_limitations:
   - xt_qtaguid_container_safe is placeholder until a safe reviewed patch exists
   - cgroup v2 remains optional for this 4.19 vendor kernel

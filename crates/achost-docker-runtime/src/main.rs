@@ -700,13 +700,9 @@ fn reconcile_network_once(config: &DockerRuntimeConfig) -> bool {
     if !wait_for_bridge(&config.container_bridge) {
         return false;
     }
-    for helper in [
-        config.common_bin.join("container-nat-manager.sh"),
-        config.achost_bin.join("container-nat-manager.sh"),
-    ] {
-        if is_executable(&helper) {
-            return command_success_path(&helper, &[]);
-        }
+    let helper = config.common_bin.join("achost-runtime-core");
+    if is_executable(&helper) {
+        return command_success_path(&helper, &["net-reconcile"]);
     }
     true
 }
@@ -731,18 +727,19 @@ fn wait_for_bridge(bridge: &str) -> bool {
 }
 
 fn run_protect_daemons(config: &DockerRuntimeConfig) {
-    let helper = config.common_bin.join("protect-container-daemons.sh");
+    let helper = config.common_bin.join("achost-runtime-core");
     if is_executable(&helper) {
-        command_success_path(&helper, &[]);
+        command_success_path(&helper, &["protect-daemons"]);
     }
 }
 
 fn spawn_network_watchdog(config: &DockerRuntimeConfig) {
-    let helper = config.common_bin.join("container-network-watchdog.sh");
+    let helper = config.common_bin.join("achost-runtime-core");
     if !is_executable(&helper) {
         return;
     }
     Command::new(helper)
+        .arg("net-watchdog")
         .env(
             "ACHOST_NET_LOG",
             env::var("ACHOST_NET_LOG")

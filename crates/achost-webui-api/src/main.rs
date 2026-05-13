@@ -514,9 +514,9 @@ fn ip_rule_value(priority: &str, needle: &str) -> String {
 }
 
 fn uplink_value(env: &RuntimeEnv) -> String {
-    let detect = env.common_bin.join("detect-uplink.sh");
-    if detect.exists() {
-        let result = run_program_capture(&detect, &["1.1.1.1"]);
+    let runtime_core = env.common_bin.join("achost-runtime-core");
+    if runtime_core.exists() {
+        let result = run_program_capture(&runtime_core, &["detect-uplink", "1.1.1.1"]);
         if result.ok {
             return result.output.trim().to_string();
         }

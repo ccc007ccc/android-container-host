@@ -23,10 +23,6 @@ SUPPORTED_CGROUP_MODES = ("v1", "v2")
 SUPPORTED_DOCKER_RUNTIME_MODES = ("chroot", "native")
 
 COMMON_RUNTIME_FILES = (
-    (RUNTIME_ROOT / "net" / "detect-uplink.sh", "achost/bin/detect-uplink.sh"),
-    (RUNTIME_ROOT / "net" / "container-nat-manager.sh", "achost/bin/container-nat-manager.sh"),
-    (RUNTIME_ROOT / "net" / "container-network-watchdog.sh", "achost/bin/container-network-watchdog.sh"),
-    (RUNTIME_ROOT / "memory" / "protect-container-daemons.sh", "achost/bin/protect-container-daemons.sh"),
     (RUNTIME_ROOT / "bin" / "achost-container-env.sh", "achost/bin/achost-container-env.sh"),
     (RUNTIME_ROOT / "bin" / "achost-container-validate.sh", "achost/bin/achost-container-validate.sh"),
     (SCRIPT_ROOT / "runtime-net-debug.sh", "achost/bin/runtime-net-debug.sh"),
@@ -1180,12 +1176,10 @@ def service_script(spec: ModuleSpec, start_docker_on_boot: bool = False) -> str:
     if spec.include_common:
         common_start = """
 COMMON_BIN="${ACHOST_COMMON_BIN:-$ACHOST/bin}"
-if [ -x "$COMMON_BIN/protect-container-daemons.sh" ]; then
-    "$COMMON_BIN/protect-container-daemons.sh" >/dev/null 2>&1 || true
-fi
-
-if [ -x "$COMMON_BIN/container-network-watchdog.sh" ]; then
-    "$COMMON_BIN/container-network-watchdog.sh" >/dev/null 2>&1 &
+ACHOST_RUNTIME_CORE="${ACHOST_RUNTIME_CORE:-$COMMON_BIN/achost-runtime-core}"
+if [ -x "$ACHOST_RUNTIME_CORE" ]; then
+    "$ACHOST_RUNTIME_CORE" protect-daemons >/dev/null 2>&1 || true
+    "$ACHOST_RUNTIME_CORE" net-watchdog >/dev/null 2>&1 &
 fi
 """
     docker_start = ""

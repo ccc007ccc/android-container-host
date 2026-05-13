@@ -86,9 +86,9 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "network" ]; then
 fi
 
 if [ "$MODE" = "all" ] || [ "$MODE" = "docker" ]; then
-    run_script "protect container daemons" "$SCRIPT_DIR/protect-container-daemons.sh" 0
+    run_script "protect container daemons" "$SCRIPT_DIR/achost-runtime-core" 0 protect-daemons
     run_script "Docker daemon start" "$SCRIPT_DIR/achost-docker-runtime" 1 start
-    run_script "container network reconcile" "$SCRIPT_DIR/container-nat-manager.sh" 0
+    run_script "container network reconcile" "$SCRIPT_DIR/achost-runtime-core" 0 net-reconcile
     run_script "Docker runtime smoke" "$SCRIPT_DIR/runtime-smoke-docker.sh" 1
     run_script "network debug after Docker" "$SCRIPT_DIR/runtime-net-debug.sh" 0
     run_script "Docker daemon stop" "$SCRIPT_DIR/achost-docker-runtime" 0 stop

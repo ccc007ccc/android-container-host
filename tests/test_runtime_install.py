@@ -31,8 +31,12 @@ class RuntimeInstallTest(unittest.TestCase):
             output = Path(tmp) / "manual"
             report = generate_runtime_package(output, mode="manual", cgroup_mode="v1")
 
-            nat_script = output / "achost" / "bin" / "container-nat-manager.sh"
-            watchdog = output / "achost" / "bin" / "container-network-watchdog.sh"
+            common_wrappers = [
+                output / "achost" / "bin" / "detect-uplink.sh",
+                output / "achost" / "bin" / "container-nat-manager.sh",
+                output / "achost" / "bin" / "container-network-watchdog.sh",
+                output / "achost" / "bin" / "protect-container-daemons.sh",
+            ]
             validate = output / "achost" / "bin" / "achost-container-validate.sh"
             docker_start = output / "achost" / "bin" / "achost-docker-start.sh"
             docker_stop = output / "achost" / "bin" / "achost-docker-stop.sh"
@@ -53,21 +57,8 @@ class RuntimeInstallTest(unittest.TestCase):
 
             self.assertEqual(report["mode"], "manual")
             self.assertEqual(report["docker_runtime_mode"], "native")
-            self.assertTrue(nat_script.exists())
-            self.assertTrue(nat_script.stat().st_mode & stat.S_IXUSR)
-            wrapper_subcommands = {
-                "detect-uplink.sh": "detect-uplink",
-                "container-nat-manager.sh": "net-reconcile",
-                "container-network-watchdog.sh": "net-watchdog",
-                "protect-container-daemons.sh": "protect-daemons",
-            }
-            for wrapper_name, subcommand in wrapper_subcommands.items():
-                wrapper_text = (output / "achost" / "bin" / wrapper_name).read_text()
-                self.assertIn("achost-runtime-core", wrapper_text)
-                self.assertIn(f'exec "$ACHOST_RUNTIME_CORE" {subcommand} "$@"', wrapper_text)
-                self.assertNotIn("ensure_ip_rule", wrapper_text)
-            self.assertTrue(watchdog.exists())
-            self.assertTrue(watchdog.stat().st_mode & stat.S_IXUSR)
+            for wrapper in common_wrappers:
+                self.assertFalse(wrapper.exists())
             self.assertTrue(validate.exists())
             self.assertTrue(validate.stat().st_mode & stat.S_IXUSR)
             self.assertFalse(docker_start.exists())
@@ -90,7 +81,13 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertEqual(categories["achost/bin/achost-webui-api"], "docker")
             self.assertEqual(categories["achost/bin/runtime-docker-feature-test.sh"], "docker")
             self.assertEqual(categories["achost/bin/achost-lxc-validate.sh"], "lxc")
-            self.assertEqual(categories["achost/bin/container-network-watchdog.sh"], "common")
+            for wrapper_path in [
+                "achost/bin/detect-uplink.sh",
+                "achost/bin/container-nat-manager.sh",
+                "achost/bin/container-network-watchdog.sh",
+                "achost/bin/protect-container-daemons.sh",
+            ]:
+                self.assertNotIn(wrapper_path, categories)
             self.assertEqual(categories["achost/etc/docker/daemon.json"], "docker")
             self.assertEqual(categories["achost/etc/lxc/default.conf"], "lxc")
             self.assertTrue(docker_smoke.stat().st_mode & stat.S_IXUSR)
@@ -132,7 +129,7 @@ class RuntimeInstallTest(unittest.TestCase):
             customize = output / "customize.sh"
             uninstall = output / "uninstall.sh"
             runtime_config = output / "achost" / "etc" / "achost-runtime.conf"
-            watchdog = output / "achost" / "bin" / "container-network-watchdog.sh"
+            runtime_core = output / "achost" / "bin" / "achost-runtime-core"
             lxc_config = output / "achost" / "etc" / "lxc" / "default.conf"
             docker_config = output / "achost" / "etc" / "docker" / "daemon.json"
             webroot_index = output / "webroot" / "index.html"
@@ -143,13 +140,16 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertTrue(post_fs_data.stat().st_mode & stat.S_IXUSR)
             self.assertTrue(customize.stat().st_mode & stat.S_IXUSR)
             self.assertTrue(uninstall.stat().st_mode & stat.S_IXUSR)
-            self.assertTrue(watchdog.stat().st_mode & stat.S_IXUSR)
+            self.assertTrue(runtime_core.stat().st_mode & stat.S_IXUSR)
             self.assertIn("ACHOST_VAR=/data/adb/achost-runtime", runtime_config.read_text())
             self.assertIn("ACHOST_CHROOT=/data/adb/achost-runtime/chroot", runtime_config.read_text())
             service_text = service.read_text()
             customize_text = customize.read_text()
             uninstall_text = uninstall.read_text()
-            self.assertIn("container-network-watchdog.sh", service_text)
+            self.assertIn("achost-runtime-core", service_text)
+            self.assertIn("protect-daemons", service_text)
+            self.assertIn("net-watchdog", service_text)
+            self.assertNotIn("container-network-watchdog.sh", service_text)
             self.assertIn('"$ACHOST_DATA/containerd/root"', customize_text)
             self.assertIn("/data/adb/ksu/bin", service_text)
             self.assertIn("/data/adb/ksu/bin", customize_text)
@@ -206,6 +206,13 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("achost/bin/achost-container-env.sh", paths)
             self.assertIn("achost/bin/achost-runtime-core", paths)
             self.assertIn("achost/bin/achost-supervise", paths)
+            for wrapper_path in [
+                "achost/bin/detect-uplink.sh",
+                "achost/bin/container-nat-manager.sh",
+                "achost/bin/container-network-watchdog.sh",
+                "achost/bin/protect-container-daemons.sh",
+            ]:
+                self.assertNotIn(wrapper_path, paths)
             self.assertEqual(report["assets"]["runtime_core"]["path"], "achost/bin/achost-runtime-core")
             self.assertIsNone(report["assets"]["docker_runtime"])
             self.assertNotIn("achost/bin/achost-docker-start.sh", paths)
@@ -385,8 +392,11 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("dockerd-start.log", service)
             self.assertIn("printf '1", service)
             self.assertIn("docker.autostart", customize)
-            self.assertIn("protect-container-daemons.sh", service)
-            self.assertIn("container-network-watchdog.sh", service)
+            self.assertIn("achost-runtime-core", service)
+            self.assertIn("protect-daemons", service)
+            self.assertIn("net-watchdog", service)
+            self.assertNotIn("protect-container-daemons.sh", service)
+            self.assertNotIn("container-network-watchdog.sh", service)
 
     def test_native_runtime_mode_writes_config_and_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
