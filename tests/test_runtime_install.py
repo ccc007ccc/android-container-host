@@ -114,7 +114,6 @@ class RuntimeInstallTest(unittest.TestCase):
             watchdog = output / "achost" / "bin" / "container-network-watchdog.sh"
             lxc_config = output / "achost" / "etc" / "lxc" / "default.conf"
             docker_config = output / "achost" / "etc" / "docker" / "daemon.json"
-            system_docker = output / "system" / "bin" / "docker"
             webroot_index = output / "webroot" / "index.html"
 
             self.assertEqual(report["install_prefix"], "/data/adb/modules/achost-runtime/achost")
@@ -126,23 +125,29 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertTrue(watchdog.stat().st_mode & stat.S_IXUSR)
             self.assertIn("ACHOST_VAR=/data/adb/achost-runtime", runtime_config.read_text())
             self.assertIn("ACHOST_CHROOT=/data/adb/achost-runtime/chroot", runtime_config.read_text())
-            self.assertIn("container-network-watchdog.sh", service.read_text())
-            self.assertIn('"$ACHOST_DATA/containerd/root"', customize.read_text())
-            self.assertIn("achost-docker-stop.sh", uninstall.read_text())
-            self.assertIn("/data/local/tmp/achost-network-watchdog.pid", uninstall.read_text())
+            service_text = service.read_text()
+            customize_text = customize.read_text()
+            uninstall_text = uninstall.read_text()
+            self.assertIn("container-network-watchdog.sh", service_text)
+            self.assertIn('"$ACHOST_DATA/containerd/root"', customize_text)
+            self.assertIn("/data/adb/ksu/bin", service_text)
+            self.assertIn("/data/adb/ksu/bin", customize_text)
+            self.assertIn("ACHOST_DOCKER_WRAPPER", service_text)
+            self.assertIn("ACHOST_DOCKER_WRAPPER", customize_text)
+            self.assertIn("achost-docker-stop.sh", uninstall_text)
+            self.assertIn("grep -q 'ACHOST_DOCKER_WRAPPER'", uninstall_text)
+            self.assertIn("rm -f /data/adb/ksu/bin/docker", uninstall_text)
+            self.assertIn("/data/local/tmp/achost-network-watchdog.pid", uninstall_text)
             self.assertIn("/data/adb/modules/achost-runtime/achost/etc/lxc/android-common.conf", lxc_config.read_text())
             self.assertIn('"bip": "172.31.0.1/16"', docker_config.read_text())
             self.assertNotIn('"bridge": "docker0"', docker_config.read_text())
-            self.assertTrue(system_docker.stat().st_mode & stat.S_IXUSR)
+            self.assertFalse((output / "system" / "bin" / "docker").exists())
+            self.assertFalse((output / "system" / "xbin" / "docker").exists())
             self.assertTrue(webroot_index.exists())
             self.assertIn("ACHost Docker", webroot_index.read_text())
             manifest = json.loads((output / "manifest.json").read_text())
             categories = {item["path"]: item["category"] for item in manifest["files"]}
             self.assertEqual(categories["webroot/index.html"], "webui")
-            system_docker_text = system_docker.read_text()
-            self.assertIn("/data/adb/modules/achost-runtime/achost", system_docker_text)
-            self.assertIn("achost-container-env.sh", system_docker_text)
-            self.assertIn('exec "$ACHOST/bin/docker"', system_docker_text)
 
     def test_kernelsu_module_zip_contains_root_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -159,7 +164,7 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("uninstall.sh", names)
             self.assertIn("webroot/index.html", names)
             self.assertIn("achost/bin/achost-docker-start.sh", names)
-            self.assertIn("system/bin/docker", names)
+            self.assertFalse(any(name.startswith("system/") and name.endswith("/docker") for name in names))
 
     def test_kernelsu_base_module_excludes_feature_payloads(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -177,6 +182,11 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertNotIn("achost/bin/achost-docker-start.sh", paths)
             self.assertNotIn("achost/bin/achost-lxc-validate.sh", paths)
             self.assertFalse((output / "system" / "bin" / "docker").exists())
+            self.assertFalse((output / "system" / "xbin" / "docker").exists())
+            self.assertFalse((output / "system" / "product" / "bin" / "docker").exists())
+            self.assertFalse((output / "system" / "system_ext" / "bin" / "docker").exists())
+            self.assertFalse((output / "system" / "vendor" / "bin" / "docker").exists())
+            self.assertFalse((output / "system" / "vendor" / "xbin" / "docker").exists())
             self.assertFalse((output / "webroot" / "index.html").exists())
             self.assertNotIn("docker", manifest["included_categories"])
             self.assertNotIn("lxc", manifest["included_categories"])
@@ -189,6 +199,9 @@ class RuntimeInstallTest(unittest.TestCase):
             manifest = json.loads((output / "manifest.json").read_text())
             webui_config = json.loads((output / "webroot" / "achost-webui-config.json").read_text())
             paths = {item["path"] for item in manifest["files"]}
+            service_text = (output / "service.sh").read_text()
+            customize_text = (output / "customize.sh").read_text()
+            uninstall_text = (output / "uninstall.sh").read_text()
 
             self.assertEqual(report["module_id"], "achost-docker")
             self.assertEqual(manifest["module_target"], "docker")
@@ -196,11 +209,17 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertEqual(manifest["provides"], ["docker"])
             self.assertIn("achost/bin/achost-docker-start.sh", paths)
             self.assertIn("achost/bin/achost-webui-api.sh", paths)
-            self.assertIn("system/bin/docker", paths)
+            self.assertFalse(any(path.startswith("system/") and path.endswith("/docker") for path in paths))
             self.assertIn("webroot/index.html", paths)
             self.assertNotIn("achost/bin/achost-container-env.sh", paths)
             self.assertNotIn("achost/bin/achost-supervise", paths)
             self.assertNotIn("achost/bin/achost-lxc-validate.sh", paths)
+            self.assertIn("/data/adb/ksu/bin", service_text)
+            self.assertIn("/data/adb/ksu/bin", customize_text)
+            self.assertIn("ACHOST_DOCKER_WRAPPER", service_text)
+            self.assertIn("ACHOST_DOCKER_WRAPPER", customize_text)
+            self.assertIn("grep -q 'ACHOST_DOCKER_WRAPPER'", uninstall_text)
+            self.assertIn("rm -f /data/adb/ksu/bin/docker", uninstall_text)
             self.assertEqual(webui_config["api"], "/data/adb/modules/achost-docker/achost/bin/achost-webui-api.sh")
             self.assertNotIn("lxc", manifest["included_categories"])
             self.assertNotIn("supervisor", manifest["included_categories"])
@@ -222,6 +241,11 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertNotIn("achost/bin/achost-webui-api.sh", paths)
             self.assertNotIn("achost/bin/achost-supervise", paths)
             self.assertFalse((output / "system" / "bin" / "docker").exists())
+            self.assertFalse((output / "system" / "xbin" / "docker").exists())
+            self.assertFalse((output / "system" / "product" / "bin" / "docker").exists())
+            self.assertFalse((output / "system" / "system_ext" / "bin" / "docker").exists())
+            self.assertFalse((output / "system" / "vendor" / "bin" / "docker").exists())
+            self.assertFalse((output / "system" / "vendor" / "xbin" / "docker").exists())
             self.assertFalse((output / "webroot" / "index.html").exists())
             self.assertNotIn("docker", manifest["included_categories"])
             self.assertNotIn("webui", manifest["included_categories"])

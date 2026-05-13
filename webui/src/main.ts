@@ -293,17 +293,17 @@ function renderContainerRows(): string {
   }
   return items
     .map((item) => {
-      const target = item.name || item.id;
+      const target = item.id || item.name;
       const running = isRunningContainer(item);
       return `
         <article class="table-row container-row">
-          <div>
-            <strong>${escapeHtml(item.name || item.id.slice(0, 12))}</strong>
-            <small>${escapeHtml(item.id.slice(0, 12))}</small>
+          <div class="identity-cell">
+            <strong title="${escapeHtml(item.name || item.id)}">${escapeHtml(item.name || '(无名称)')}</strong>
+            <small title="${escapeHtml(item.id)}">ID: ${escapeHtml(item.id)}</small>
           </div>
-          <div>
-            <span>${escapeHtml(item.image)}</span>
-            <small>${escapeHtml(item.created)}</small>
+          <div class="meta-cell">
+            <span title="${escapeHtml(item.image)}">${escapeHtml(item.image)}</span>
+            <small title="${escapeHtml(item.created)}">创建时间: ${escapeHtml(item.created)}</small>
           </div>
           <div><span class="badge ${running ? 'green' : 'slate'}">${escapeHtml(item.status)}</span></div>
           <div class="row-actions">

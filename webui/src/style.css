@@ -153,9 +153,6 @@ label {
 
 .brand strong,
 .brand small,
-.table-row strong,
-.table-row span,
-.table-row small,
 .detail-item strong,
 .detail-item span {
   display: block;
@@ -163,6 +160,13 @@ label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.table-row strong,
+.table-row span,
+.table-row small {
+  display: block;
+  min-width: 0;
 }
 
 .brand small,
@@ -367,7 +371,29 @@ nav {
 }
 
 .container-row {
-  grid-template-columns: minmax(8rem, 1fr) minmax(10rem, 1.2fr) minmax(9rem, 0.9fr) minmax(16rem, auto);
+  grid-template-columns: minmax(16rem, 1.15fr) minmax(16rem, 1.15fr) minmax(9rem, 0.8fr) minmax(14rem, auto);
+}
+
+.container-row .row-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+.container-row .row-actions button {
+  min-width: 0;
+  padding: 0.52rem 0.45rem;
+  font-size: 0.78rem;
+}
+
+.identity-cell strong,
+.identity-cell small,
+.meta-cell span,
+.meta-cell small {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .image-row {
@@ -523,9 +549,20 @@ nav {
     align-items: start;
   }
 
+  .top-actions,
+  .button-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .top-actions .pill {
+    grid-column: 1 / -1;
+    justify-content: center;
+  }
+
   .search,
   .top-actions button,
-  .row-actions button,
   .button-row button,
   .switch {
     width: 100%;

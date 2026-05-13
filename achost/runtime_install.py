@@ -92,8 +92,8 @@ MODULE_SPECS = {
     "legacy": ModuleSpec(
         "legacy",
         LEGACY_MODULE_ID,
-        "Android Container Host Runtime",
-        "Legacy all-in-one runtime module for Docker/LXC on Android container host kernels.",
+        "ACHost 运行时（旧版）",
+        "旧版一体化运行时模块，包含 ACHost 公共组件、Docker 和 LXC。",
         LEGACY_DATA_ROOT,
         (),
         ("common", "docker", "lxc"),
@@ -106,8 +106,8 @@ MODULE_SPECS = {
     "base": ModuleSpec(
         "base",
         "achost-base",
-        "Android Container Host Base",
-        "Shared ACHOST runtime, supervisor, sysctl, networking and diagnostics for feature modules.",
+        "ACHost 基础模块",
+        "提供 ACHost 公共运行时、supervisor、sysctl、网络守护和诊断能力，供 Docker/LXC 模块依赖。",
         SPLIT_DATA_ROOT,
         (),
         ("common",),
@@ -120,8 +120,8 @@ MODULE_SPECS = {
     "docker": ModuleSpec(
         "docker",
         "achost-docker",
-        "Android Container Host Docker",
-        "Docker runtime, command line wrapper and WebUI for ACHOST.",
+        "ACHost Docker 模块",
+        "提供 ACHost 的 Docker 引擎、命令行包装器、Compose/buildx/BuildKit 支持和 Docker 管理 WebUI。",
         SPLIT_DATA_ROOT,
         ("achost-base",),
         ("docker",),
@@ -134,8 +134,8 @@ MODULE_SPECS = {
     "lxc": ModuleSpec(
         "lxc",
         "achost-lxc",
-        "Android Container Host LXC",
-        "LXC runtime configs and validation tools for ACHOST.",
+        "ACHost LXC 模块",
+        "提供 ACHost 的 LXC 配置、用户态文件和验证工具，依赖基础模块运行。",
         SPLIT_DATA_ROOT,
         ("achost-base",),
         ("lxc",),
@@ -404,15 +404,6 @@ def write_docker_wrappers(root: Path, mode: str, install_prefix: str, spec: Modu
             category="docker",
         )
     ]
-    if mode == "kernelsu-module":
-        files.append(
-            write_executable_text(
-                root,
-                "system/bin/docker",
-                module_docker_wrapper(install_prefix, spec),
-                category="docker",
-            )
-        )
     return files
 
 
@@ -435,6 +426,7 @@ elif [ -r "/data/adb/modules/achost-base/achost/bin/achost-container-env.sh" ]; 
     . "$ACHOST_BASE/bin/achost-container-env.sh"
 '''
     return f'''#!/system/bin/sh
+# ACHOST_DOCKER_WRAPPER
 set -u
 ACHOST="${{ACHOST:-{install_prefix}}}"
 if [ -r "$ACHOST/bin/achost-container-env.sh" ]; then
@@ -444,6 +436,21 @@ if [ -r "$ACHOST/bin/achost-container-env.sh" ]; then
     exit 1
 fi
 exec "$ACHOST/bin/docker" "$@"
+'''
+
+
+def ksu_docker_wrapper_install_script(install_prefix: str, spec: ModuleSpec) -> str:
+    wrapper = module_docker_wrapper(install_prefix, spec).rstrip()
+    return f'''
+install_docker_cli_wrapper() {{
+    ksu_bin="/data/adb/ksu/bin"
+    mkdir -p "$ksu_bin" 2>/dev/null || return 0
+    cat > "$ksu_bin/docker" <<'ACHOST_DOCKER_WRAPPER'
+{wrapper}
+ACHOST_DOCKER_WRAPPER
+    chmod 0755 "$ksu_bin/docker" 2>/dev/null || true
+}}
+install_docker_cli_wrapper
 '''
 
 
@@ -1031,7 +1038,7 @@ fi
 """
     docker_start = ""
     if spec.include_docker:
-        docker_start = f"""
+        docker_start = ksu_docker_wrapper_install_script(install_prefix_for_mode("kernelsu-module", spec), spec) + f"""
 AUTOSTART_FILE="$ACHOST_CONFIG/docker.autostart"
 [ -e "$AUTOSTART_FILE" ] || printf '{seed_autostart}\n' > "$AUTOSTART_FILE" 2>/dev/null || true
 if [ "$(cat "$AUTOSTART_FILE" 2>/dev/null || printf '0')" = "1" ] && [ -x "$ACHOST/bin/achost-docker-start.sh" ]; then
@@ -1066,10 +1073,9 @@ def customize_script(spec: ModuleSpec, start_docker_on_boot: bool = False) -> st
     seed_autostart = "1" if start_docker_on_boot else "0"
     docker_setup = ""
     if spec.include_docker:
-        docker_setup = f"""
+        docker_setup = ksu_docker_wrapper_install_script(install_prefix_for_mode("kernelsu-module", spec), spec) + f"""
 chmod 0755 "$ACHOST/wrappers"/* 2>/dev/null || true
 chmod 0755 "$ACHOST/etc/docker/cli-plugins"/* 2>/dev/null || true
-chmod 0755 "$MODDIR/system/bin/docker" 2>/dev/null || true
 AUTOSTART_FILE="$ACHOST_DATA/config/docker.autostart"
 [ -e "$AUTOSTART_FILE" ] || printf '{seed_autostart}\n' > "$AUTOSTART_FILE" 2>/dev/null || true
 
@@ -1099,10 +1105,16 @@ chmod 0755 "$ACHOST/bin"/* 2>/dev/null || true
 
 def uninstall_script(spec: ModuleSpec) -> str:
     docker_stop = ""
+    docker_cleanup = ""
     if spec.include_docker:
         docker_stop = """
 if [ -x "$ACHOST/bin/achost-docker-stop.sh" ]; then
     "$ACHOST/bin/achost-docker-stop.sh" >/dev/null 2>&1 || true
+fi
+"""
+        docker_cleanup = """
+if [ -r /data/adb/ksu/bin/docker ] && grep -q 'ACHOST_DOCKER_WRAPPER' /data/adb/ksu/bin/docker 2>/dev/null; then
+    rm -f /data/adb/ksu/bin/docker 2>/dev/null || true
 fi
 """
     common_stop = ""
@@ -1130,7 +1142,7 @@ elif [ -r "/data/adb/modules/achost-base/achost/bin/achost-container-env.sh" ]; 
     ACHOST_BASE="${{ACHOST_BASE:-/data/adb/modules/achost-base/achost}}"
     . "$ACHOST_BASE/bin/achost-container-env.sh"
 fi
-{docker_stop}{common_stop}
+{docker_stop}{common_stop}{docker_cleanup}
 rm -rf "${{ACHOST_RUN:-$ACHOST_DATA/run}}" "${{ACHOST_LOG_DIR:-$ACHOST_DATA/log}}" "${{ACHOST_CHROOT:-$ACHOST_DATA/chroot}}" "${{ACHOST_NATIVE_ROOT:-$ACHOST_DATA/native-root}}" "${{ACHOST_CONTAINERD_STATE:-$ACHOST_DATA/containerd/state}}" 2>/dev/null || true
 mkdir -p "$ACHOST_DATA/docker" "$ACHOST_DATA/containerd/root" 2>/dev/null || true
 """

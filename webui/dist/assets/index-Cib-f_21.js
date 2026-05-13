@@ -26,15 +26,15 @@
         ${u("开机自启",s?.autostart?"已开启":"未开启")}
       </div>
     </section>
-  `}function tt(){const t=E.trim().toLowerCase();return t?k.filter(e=>[e.name,e.id,e.image,e.status].some(a=>a.toLowerCase().includes(t))):k}function et(){const t=tt();return t.length?t.map(e=>{const a=e.name||e.id,l=V(e);return`
+  `}function tt(){const t=E.trim().toLowerCase();return t?k.filter(e=>[e.name,e.id,e.image,e.status].some(a=>a.toLowerCase().includes(t))):k}function et(){const t=tt();return t.length?t.map(e=>{const a=e.id||e.name,l=V(e);return`
         <article class="table-row container-row">
-          <div>
-            <strong>${r(e.name||e.id.slice(0,12))}</strong>
-            <small>${r(e.id.slice(0,12))}</small>
+          <div class="identity-cell">
+            <strong title="${r(e.name||e.id)}">${r(e.name||"(无名称)")}</strong>
+            <small title="${r(e.id)}">ID: ${r(e.id)}</small>
           </div>
-          <div>
-            <span>${r(e.image)}</span>
-            <small>${r(e.created)}</small>
+          <div class="meta-cell">
+            <span title="${r(e.image)}">${r(e.image)}</span>
+            <small title="${r(e.created)}">创建时间: ${r(e.created)}</small>
           </div>
           <div><span class="badge ${l?"green":"slate"}">${r(e.status)}</span></div>
           <div class="row-actions">

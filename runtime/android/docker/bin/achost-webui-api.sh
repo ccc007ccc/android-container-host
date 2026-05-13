@@ -25,12 +25,12 @@ DOCKER_HOST="${DOCKER_HOST:-unix://$ACHOST_RUN/docker.sock}"
 ACHOST_COMMON="${ACHOST_COMMON:-$ACHOST}"
 ACHOST_COMMON_BIN="${ACHOST_COMMON_BIN:-$ACHOST_COMMON/bin}"
 DOCKER="$ACHOST_BIN/docker"
-TAB="$(printf '\t')"
+FIELD_SEP="|"
 ACHOST_CONFIG="${ACHOST_CONFIG:-$ACHOST_VAR/config}"
 AUTOSTART_FILE="$ACHOST_CONFIG/docker.autostart"
 
 json_escape() {
-    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s//\\r/g; s/	/\\t/g' | tr '\n' ' '
+    printf '%s' "$1" | LC_ALL=C tr -d '\001-\010\013\014\016-\037' | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' '
 }
 
 json_string() {
@@ -165,13 +165,13 @@ status_json() {
     [ "$BASE_ENV_PRESENT" = "1" ] && base_present=1
 
     if [ "$running" = "1" ] && [ -x "$DOCKER" ]; then
-        info="$($DOCKER info --format '{{.ServerVersion}}\t{{.CgroupVersion}}\t{{.Driver}}' 2>&1)" || {
+        info="$($DOCKER info --format '{{.ServerVersion}}|{{.CgroupVersion}}|{{.Driver}}' 2>&1)" || {
             docker_error="$info"
             info=""
         }
         if [ -n "$info" ]; then
             old_ifs="$IFS"
-            IFS="\t"
+            IFS="$FIELD_SEP"
             set -- $info
             IFS="$old_ifs"
             server_version="${1:-}"
@@ -262,7 +262,7 @@ list_containers() {
     fi
     printf '{"ok":true,"containers":['
     first=1
-    $DOCKER ps -a --no-trunc --format '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.CreatedAt}}' 2>/dev/null | while IFS="\t" read -r id name image status created; do
+    $DOCKER ps -a --no-trunc --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.CreatedAt}}' 2>/dev/null | while IFS="$FIELD_SEP" read -r id name image status created; do
         [ -n "$id" ] || continue
         if [ "$first" = "1" ]; then first=0; else printf ','; fi
         printf '{"id":'; json_string "$id"
@@ -286,7 +286,7 @@ list_images() {
     fi
     printf '{"ok":true,"images":['
     first=1
-    $DOCKER images --format '{{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}\t{{.CreatedSince}}' 2>/dev/null | while IFS="\t" read -r repository tag id size created; do
+    $DOCKER images --no-trunc --format '{{.Repository}}|{{.Tag}}|{{.ID}}|{{.Size}}|{{.CreatedSince}}' 2>/dev/null | while IFS="$FIELD_SEP" read -r repository tag id size created; do
         [ -n "$id" ] || continue
         if [ "$first" = "1" ]; then first=0; else printf ','; fi
         printf '{"repository":'; json_string "$repository"
