@@ -181,7 +181,7 @@ def generate_runtime_package(
     lxc_asset: str | Path | None = None,
     lxc_sha256: str | None = None,
     start_docker_on_boot: bool = False,
-    docker_runtime_mode: str = "chroot",
+    docker_runtime_mode: str = "native",
     module_target: str = "legacy",
 ) -> dict[str, Any]:
     if mode not in SUPPORTED_MODES:

@@ -116,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_install.add_argument("--mode", choices=("manual", "kernelsu-module"), default="manual")
     runtime_install.add_argument("--module-target", choices=("legacy", "base", "docker", "lxc"), default="legacy")
     runtime_install.add_argument("--cgroup-mode", choices=("v1", "v2"), default="v1")
-    runtime_install.add_argument("--docker-runtime-mode", choices=("chroot", "native"), default="chroot")
+    runtime_install.add_argument("--docker-runtime-mode", choices=("chroot", "native"), default="native")
     runtime_install.add_argument("--docker-asset")
     runtime_install.add_argument("--docker-sha256")
     runtime_install.add_argument("--compose-asset")

@@ -52,7 +52,7 @@ class RuntimeInstallTest(unittest.TestCase):
             categories = {item["path"]: item["category"] for item in manifest["files"]}
 
             self.assertEqual(report["mode"], "manual")
-            self.assertEqual(report["docker_runtime_mode"], "chroot")
+            self.assertEqual(report["docker_runtime_mode"], "native")
             self.assertTrue(nat_script.exists())
             self.assertTrue(nat_script.stat().st_mode & stat.S_IXUSR)
             wrapper_subcommands = {
@@ -120,8 +120,8 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("achost-container-env.sh", docker_wrapper_text)
             self.assertIn('exec "$ACHOST/bin/docker"', docker_wrapper_text)
             self.assertFalse((output / "system" / "bin" / "docker").exists())
-            self.assertIn("ACHOST_RUNTIME_MODE=chroot", runtime_config.read_text())
-            self.assertIn("ACHOST_USE_CHROOT=1", runtime_config.read_text())
+            self.assertIn("ACHOST_RUNTIME_MODE=native", runtime_config.read_text())
+            self.assertIn("ACHOST_USE_CHROOT=0", runtime_config.read_text())
             self.assertIn("ACHOST_CGROUP_MODE=v1", runtime_config.read_text())
             docker_daemon = json.loads(docker_config.read_text())
             self.assertIn("native.cgroupdriver=cgroupfs", docker_daemon["exec-opts"])
@@ -134,7 +134,7 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("stop_old_watchdog", install_script.read_text())
             self.assertTrue(runtime_test.stat().st_mode & stat.S_IXUSR)
             self.assertEqual(manifest["cgroup_mode"], "v1")
-            self.assertEqual(manifest["docker_runtime_mode"], "chroot")
+            self.assertEqual(manifest["docker_runtime_mode"], "native")
             self.assertIsNone(manifest["assets"]["docker"])
 
     def test_kernelsu_module_contains_module_entrypoints(self):
@@ -413,6 +413,8 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("setup_native_root_files", docker_start)
             self.assertIn("daemon_namespace_diagnostics", docker_start)
             self.assertIn("--native-root", docker_start)
+            self.assertIn('ACHOST_RUNTIME_MODE="${ACHOST_RUNTIME_MODE:-native}"', env)
+            self.assertIn("*) ACHOST_RUNTIME_MODE=native; ACHOST_USE_CHROOT_DEFAULT=0 ;;", env)
             self.assertIn("ACHOST_RUNTIME_CONF", env)
             self.assertIn("ACHOST_BIND_PATHS", env)
             self.assertIn("ACHOST_NATIVE_ROOT", env)
