@@ -11,6 +11,14 @@ if [ -r "$SCRIPT_DIR/achost-container-env.sh" ]; then
     . "$SCRIPT_DIR/achost-container-env.sh"
 fi
 FAILURES=0
+COMMON_BIN="${ACHOST_COMMON_BIN:-$SCRIPT_DIR}"
+if [ -x "$SCRIPT_DIR/achost-docker-runtime" ] || [ -x "$SCRIPT_DIR/runtime-smoke-docker.sh" ]; then
+    DOCKER_ROOT="$ACHOST"
+    DOCKER_BIN="$SCRIPT_DIR"
+else
+    DOCKER_ROOT="${ACHOST_DOCKER_MODULE:-$ACHOST}"
+    DOCKER_BIN="$DOCKER_ROOT/bin"
+fi
 
 section() {
     printf '\n## %s\n' "$1"
@@ -58,7 +66,7 @@ check_network_watchdog() {
     else
         printf 'pid file not found: %s\n' "$pid_file"
     fi
-    { ps -A 2>/dev/null || ps 2>/dev/null; } | grep '[c]ontainer-network-watchdog' || true
+    { ps -A -o PID,ARGS 2>/dev/null || ps -A 2>/dev/null || ps 2>/dev/null; } | grep -E '[a]chost-runtime-core|[n]et-watchdog' || true
     if [ -r "$log_file" ]; then
         tail -n 40 "$log_file" 2>/dev/null || true
     else
@@ -86,12 +94,23 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "network" ]; then
 fi
 
 if [ "$MODE" = "all" ] || [ "$MODE" = "docker" ]; then
-    run_script "protect container daemons" "$SCRIPT_DIR/achost-runtime-core" 0 protect-daemons
-    run_script "Docker daemon start" "$SCRIPT_DIR/achost-docker-runtime" 1 start
-    run_script "container network reconcile" "$SCRIPT_DIR/achost-runtime-core" 0 net-reconcile
-    run_script "Docker runtime smoke" "$SCRIPT_DIR/runtime-smoke-docker.sh" 1
-    run_script "network debug after Docker" "$SCRIPT_DIR/runtime-net-debug.sh" 0
-    run_script "Docker daemon stop" "$SCRIPT_DIR/achost-docker-runtime" 0 stop
+    ACHOST="$DOCKER_ROOT"
+    ACHOST_BIN="$DOCKER_BIN"
+    ACHOST_ETC="$DOCKER_ROOT/etc"
+    ACHOST_COMMON="${ACHOST_COMMON:-$ACHOST_BASE}"
+    ACHOST_COMMON_BIN="$COMMON_BIN"
+    DOCKER_CONFIG="$ACHOST_ETC/docker"
+    DOCKER_CLI_PLUGIN_EXTRA_DIRS="$DOCKER_CONFIG/cli-plugins:$DOCKER_ROOT/libexec/docker/cli-plugins"
+    ACHOST_CONTAINERD_CONFIG="$ACHOST_ETC/containerd/config.toml"
+    PATH="$DOCKER_BIN:$COMMON_BIN:$PATH"
+    export ACHOST ACHOST_BIN ACHOST_ETC ACHOST_COMMON ACHOST_COMMON_BIN DOCKER_CONFIG DOCKER_CLI_PLUGIN_EXTRA_DIRS ACHOST_CONTAINERD_CONFIG PATH
+    run_script "protect container daemons" "$COMMON_BIN/achost-runtime-core" 0 protect-daemons
+    run_script "Docker daemon start" "$DOCKER_BIN/achost-docker-runtime" 1 start
+    run_script "container network reconcile" "$COMMON_BIN/achost-runtime-core" 0 net-reconcile
+    run_script "Docker runtime smoke" "$DOCKER_BIN/runtime-smoke-docker.sh" 1
+    run_script "Docker feature matrix" "$DOCKER_BIN/runtime-docker-feature-test.sh" 1
+    run_script "network debug after Docker" "$COMMON_BIN/runtime-net-debug.sh" 0
+    run_script "Docker daemon stop" "$DOCKER_BIN/achost-docker-runtime" 0 stop
 fi
 
 if [ "$MODE" = "all" ] || [ "$MODE" = "lxc" ]; then

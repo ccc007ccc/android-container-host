@@ -20,6 +20,7 @@ from achost.runtime_install import (
     COMPOSE_PLUGIN_REL,
     COMPOSE_STANDALONE_REL,
     DOCKER_REQUIRED_BINARIES,
+    STALE_RUNTIME_ENTRYPOINTS,
     create_runtime_zip,
     generate_runtime_package,
 )
@@ -112,11 +113,44 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertEqual(docker_daemon["runtimes"]["runc-nopivot"]["options"]["BinaryName"], "@ACHOST_PREFIX@/bin/runc")
             self.assertIn("/data/adb/achost/etc/lxc/android-common.conf", lxc_config.read_text())
             self.assertTrue(install_script.stat().st_mode & stat.S_IXUSR)
-            self.assertIn("stop_old_watchdog", install_script.read_text())
+            install_text = install_script.read_text()
+            self.assertIn("stop_old_watchdog", install_text)
+            self.assertIn('prune_stale_runtime_entrypoints "$DEST/bin"', install_text)
+            for stale_entrypoint in STALE_RUNTIME_ENTRYPOINTS:
+                self.assertIn(stale_entrypoint, install_text)
             self.assertTrue(runtime_test.stat().st_mode & stat.S_IXUSR)
             self.assertEqual(manifest["cgroup_mode"], "v1")
             self.assertEqual(manifest["docker_runtime_mode"], "native")
             self.assertIsNone(manifest["assets"]["docker"])
+
+    def test_manual_install_prunes_stale_runtime_entrypoints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            package = tmp_path / "manual"
+            dest = tmp_path / "dest"
+            generate_runtime_package(package, mode="manual")
+            stale_bin = dest / "bin"
+            stale_bin.mkdir(parents=True)
+            for stale_entrypoint in STALE_RUNTIME_ENTRYPOINTS:
+                stale_path = stale_bin / stale_entrypoint
+                stale_path.write_text("stale")
+                stale_path.chmod(0o755)
+
+            env = os.environ.copy()
+            env["DEST"] = str(dest)
+            subprocess.run(
+                ["bash", str(package / "install.sh")],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            for stale_entrypoint in STALE_RUNTIME_ENTRYPOINTS:
+                self.assertFalse((stale_bin / stale_entrypoint).exists())
+            self.assertTrue((dest / "bin" / "achost-runtime-core").exists())
+            self.assertTrue((dest / "bin" / "achost-docker-runtime").exists())
 
     def test_kernelsu_module_contains_module_entrypoints(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -149,7 +183,12 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("achost-runtime-core", service_text)
             self.assertIn("protect-daemons", service_text)
             self.assertIn("net-watchdog", service_text)
-            self.assertNotIn("container-network-watchdog.sh", service_text)
+            self.assertNotIn('"$COMMON_BIN/container-network-watchdog.sh"', service_text)
+            self.assertIn('prune_stale_runtime_entrypoints "$ACHOST/bin"', service_text)
+            self.assertIn('prune_stale_runtime_entrypoints "$ACHOST/bin"', customize_text)
+            for stale_entrypoint in STALE_RUNTIME_ENTRYPOINTS:
+                self.assertIn(stale_entrypoint, service_text)
+                self.assertIn(stale_entrypoint, customize_text)
             self.assertIn('"$ACHOST_DATA/containerd/root"', customize_text)
             self.assertIn("/data/adb/ksu/bin", service_text)
             self.assertIn("/data/adb/ksu/bin", customize_text)
@@ -388,15 +427,15 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("docker.autostart", service)
             self.assertIn("achost-docker-runtime", service)
             self.assertIn('"$ACHOST/bin/achost-docker-runtime" start', service)
-            self.assertNotIn("achost-docker-start.sh", service)
+            self.assertNotIn('"$ACHOST/bin/achost-docker-start.sh"', service)
             self.assertIn("dockerd-start.log", service)
             self.assertIn("printf '1", service)
             self.assertIn("docker.autostart", customize)
             self.assertIn("achost-runtime-core", service)
             self.assertIn("protect-daemons", service)
             self.assertIn("net-watchdog", service)
-            self.assertNotIn("protect-container-daemons.sh", service)
-            self.assertNotIn("container-network-watchdog.sh", service)
+            self.assertNotIn('"$COMMON_BIN/protect-container-daemons.sh"', service)
+            self.assertNotIn('"$COMMON_BIN/container-network-watchdog.sh"', service)
 
     def test_native_runtime_mode_writes_config_and_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -433,10 +472,12 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertFalse((output / "achost" / "bin" / "achost-docker-start.sh").exists())
             self.assertFalse((output / "achost" / "bin" / "achost-docker-stop.sh").exists())
 
-    def test_refuses_unknown_docker_runtime_mode(self):
+    def test_refuses_non_native_docker_runtime_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ValueError, "unsupported docker runtime mode"):
                 generate_runtime_package(Path(tmp) / "manual", docker_runtime_mode="bad")
+            with self.assertRaisesRegex(ValueError, "unsupported docker runtime mode"):
+                generate_runtime_package(Path(tmp) / "manual-chroot", docker_runtime_mode="chroot")
 
     def test_docker_asset_extracts_binaries_and_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:

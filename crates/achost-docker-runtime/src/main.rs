@@ -1089,7 +1089,7 @@ fn pid_from_file(pid_file: &Path) -> Option<u32> {
 
 fn run_stop() -> i32 {
     if unsafe { libc::geteuid() } != 0 {
-        eprintln!("achost-docker-stop requires root");
+        eprintln!("achost-docker-runtime stop requires root");
         return 1;
     }
 

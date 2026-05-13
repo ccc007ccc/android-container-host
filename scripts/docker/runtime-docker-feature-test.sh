@@ -7,7 +7,11 @@ if [ -r "$ACHOST/bin/achost-container-env.sh" ]; then
     . "$ACHOST/bin/achost-container-env.sh"
 fi
 
-DOCKER="$ACHOST_BIN/docker"
+if [ -x "$SCRIPT_DIR/docker" ]; then
+    DOCKER="${DOCKER:-$SCRIPT_DIR/docker}"
+else
+    DOCKER="${DOCKER:-${ACHOST_BIN:-$SCRIPT_DIR}/docker}"
+fi
 STAMP="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
 REPORT="${REPORT:-/data/local/tmp/achost-docker-feature-$STAMP.txt}"
 IMAGE="${IMAGE:-achost-dockertest:local}"
@@ -148,4 +152,7 @@ feature_matrix
 cleanup_containers
 printf '\n# SUMMARY pass=%s fail=%s limit=%s skip=%s\n' "$pass_count" "$fail_count" "$limit_count" "$skip_count"
 printf 'REPORT=%s\n' "$REPORT"
+if [ "$fail_count" -ne 0 ]; then
+    exit 1
+fi
 exit 0

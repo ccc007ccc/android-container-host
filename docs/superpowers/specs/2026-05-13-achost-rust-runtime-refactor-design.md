@@ -21,12 +21,12 @@ Already implemented in Rust:
   - `cleanup-stale-iptables`
   - `stop`
 
-Docker native runtime is the intended default. The package generator, CLI default, and runtime env default should write or resolve:
+Docker native runtime is the supported Docker start path. The package generator and CLI accept or write native Docker runtime configuration only, and runtime env defaults resolve:
 
 - `ACHOST_RUNTIME_MODE=native`
 - `ACHOST_USE_CHROOT=0`
 
-Unknown or missing runtime mode must not silently expand chroot usage. During the transition it may be normalized to native or rejected with a clear error, but new code should not add chroot fallback paths.
+Unknown or unsupported Docker runtime modes must not silently expand chroot usage; they should be normalized to native at runtime boundaries or rejected with a clear error.
 
 The connected device validation showed native Docker can run with:
 
@@ -40,23 +40,17 @@ The connected device validation showed native Docker can run with:
 
 ### Rewrite and delete when replaced
 
-1. `runtime/android/docker/bin/achost-docker-start.sh`
-   - Highest priority.
-   - Current core Docker startup logic should move to `achost-docker-runtime`.
-   - Once all call sites use `achost-docker-runtime start`, remove the script from runtime packaging.
+1. Docker lifecycle shell entrypoints
+   - Completed in Phase 5.
+   - Startup and stop call sites use `achost-docker-runtime start|stop` directly.
+   - Upgrade/install scripts prune the deleted legacy entrypoints from existing installs.
 
-2. `runtime/android/docker/bin/achost-docker-stop.sh`
-   - Core stop logic is already Rust.
-   - Update call sites to use `achost-docker-runtime stop`, then remove the wrapper from packaging.
+2. Common runtime shell wrappers
+   - Completed in Phase 6.
+   - Network, uplink, watchdog, and OOM protection call sites use `achost-runtime-core` directly.
+   - Upgrade/install scripts prune the deleted legacy entrypoints from existing installs.
 
-3. Common runtime wrappers:
-   - `runtime/android/net/detect-uplink.sh`
-   - `runtime/android/net/container-nat-manager.sh`
-   - `runtime/android/net/container-network-watchdog.sh`
-   - `runtime/android/memory/protect-container-daemons.sh`
-   - Core logic is already Rust. Update call sites to use `achost-runtime-core` directly, then remove wrappers.
-
-4. `runtime/android/bin/achost-container-validate.sh`
+3. `runtime/android/bin/achost-container-validate.sh`
    - Rewrite later as Rust validation subcommands after Docker start has been simplified.
 
 ### Keep as minimal shell when required
@@ -103,7 +97,7 @@ Add subcommands to `achost-docker-runtime`:
 - `prepare-native-root`
 - `native-preflight`
 
-Move and delete shell equivalents from `achost-docker-start.sh`:
+Move and delete shell equivalents from the legacy Docker start entrypoint:
 
 - `native_preflight`
 - `daemon_namespace_diagnostics`
@@ -194,8 +188,8 @@ Responsibilities:
 After `achost-docker-runtime start` and `stop` are direct call targets:
 
 - update `service.sh`, `customize.sh`, `uninstall.sh`, WebUI API, manual installer templates, runtime tests, package tests, README, and SPEC references
-- remove `achost-docker-start.sh` from source and package manifests
-- remove `achost-docker-stop.sh` from source and package manifests
+- remove legacy Docker lifecycle entrypoints from source and package manifests
+- prune legacy Docker lifecycle entrypoints during install/upgrade
 
 Deletion gates:
 
@@ -210,7 +204,8 @@ Deletion gates:
 
 After call sites use `achost-runtime-core` directly:
 
-- remove the four common wrapper scripts from source and package manifests
+- remove legacy common runtime wrappers from source and package manifests
+- prune legacy common runtime wrappers during install/upgrade
 - keep split package boundaries intact:
   - base/common owns `achost-runtime-core`
   - docker owns `achost-docker-runtime` and WebUI API

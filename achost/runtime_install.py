@@ -20,7 +20,15 @@ SPLIT_DATA_ROOT = "/data/adb/achost"
 SUPPORTED_MODES = ("manual", "kernelsu-module")
 SUPPORTED_MODULE_TARGETS = ("legacy", "base", "docker", "lxc")
 SUPPORTED_CGROUP_MODES = ("v1", "v2")
-SUPPORTED_DOCKER_RUNTIME_MODES = ("chroot", "native")
+SUPPORTED_DOCKER_RUNTIME_MODES = ("native",)
+STALE_RUNTIME_ENTRYPOINTS = (
+    "achost-docker-start.sh",
+    "achost-docker-stop.sh",
+    "detect-uplink.sh",
+    "container-nat-manager.sh",
+    "container-network-watchdog.sh",
+    "protect-container-daemons.sh",
+)
 
 COMMON_RUNTIME_FILES = (
     (RUNTIME_ROOT / "bin" / "achost-container-env.sh", "achost/bin/achost-container-env.sh"),
@@ -390,11 +398,10 @@ def ensure_runtime_dirs(root: Path, spec: ModuleSpec) -> None:
 
 
 def write_runtime_config(root: Path, mode: str, spec: ModuleSpec, docker_runtime_mode: str, cgroup_mode: str) -> RuntimeFile:
-    use_chroot = "0" if docker_runtime_mode == "native" else "1"
     lines = [
         f"ACHOST_MODULE_TARGET={spec.target}",
         f"ACHOST_RUNTIME_MODE={docker_runtime_mode}",
-        f"ACHOST_USE_CHROOT={use_chroot}",
+        "ACHOST_USE_CHROOT=0",
         f"ACHOST_CGROUP_MODE={cgroup_mode}",
     ]
     if mode == "kernelsu-module":
@@ -518,6 +525,20 @@ exec_docker() {
     done
     eval "exec \"\$ACHOST/bin/docker\" $docker_exec_args"
 }
+'''
+
+
+def stale_runtime_entrypoints_shell_words() -> str:
+    return " ".join(STALE_RUNTIME_ENTRYPOINTS)
+
+
+def prune_stale_runtime_entrypoints_function() -> str:
+    return f'''prune_stale_runtime_entrypoints() {{
+    bin_dir="$1"
+    for name in {stale_runtime_entrypoints_shell_words()}; do
+        rm -f "$bin_dir/$name" 2>/dev/null || true
+    done
+}}
 '''
 
 
@@ -1125,9 +1146,11 @@ stop_old_watchdog() {
     rm -f "$pid_file" 2>/dev/null || true
 }
 
+@PRUNE_STALE_RUNTIME_ENTRYPOINTS_FUNCTION@
 stop_old_watchdog
 mkdir -p "$DEST"
 copy_runtime_tree "$SCRIPT_DIR/achost" "$DEST"
+prune_stale_runtime_entrypoints "$DEST/bin"
 chmod 0755 "$DEST"/bin/* 2>/dev/null || true
 chmod 0755 "$DEST"/wrappers/* 2>/dev/null || true
 chmod 0755 "$DEST"/etc/docker/cli-plugins/* 2>/dev/null || true
@@ -1137,7 +1160,7 @@ printf 'ACHOST runtime installed to %s\n' "$DEST"
 printf 'Run %s/bin/achost-container-validate.sh to check installed Docker/LXC userland.\n' "$DEST"
 printf 'Run %s/bin/achost-docker-runtime start after installing a Docker userland asset.\n' "$DEST"
 printf 'For plain docker in this shell: export PATH=%s/wrappers:%s/bin:$PATH\n' "$DEST" "$DEST"
-"""
+""".replace("@PRUNE_STALE_RUNTIME_ENTRYPOINTS_FUNCTION@", prune_stale_runtime_entrypoints_function().rstrip())
 
 
 def module_prop(spec: ModuleSpec) -> str:
@@ -1212,6 +1235,7 @@ ACHOST_CHROOT="${{ACHOST_CHROOT:-$ACHOST_VAR/chroot}}"
 ACHOST_NATIVE_ROOT="${{ACHOST_NATIVE_ROOT:-$ACHOST_VAR/native-root}}"
 ACHOST_CONTAINERD_STATE="${{ACHOST_CONTAINERD_STATE:-$ACHOST_VAR/containerd/state}}"
 mkdir -p "$ACHOST_VAR" "$ACHOST_CONFIG" "$ACHOST_VAR/docker" "$ACHOST_RUN" "$ACHOST_LOG_DIR" "$ACHOST_CHROOT" "$ACHOST_NATIVE_ROOT" "$ACHOST_VAR/containerd/root" "$ACHOST_CONTAINERD_STATE" "$ACHOST_VAR/bind-mounts" 2>/dev/null || true
+{prune_stale_runtime_entrypoints_function()}prune_stale_runtime_entrypoints "$ACHOST/bin"
 {common_start}{docker_start}"""
 
 
@@ -1246,6 +1270,7 @@ print_msg() {{
 mkdir -p "$ACHOST_DATA" "$ACHOST_DATA/config" "$ACHOST_DATA/docker" "$ACHOST_DATA/run" "$ACHOST_DATA/log" "$ACHOST_DATA/chroot" "$ACHOST_DATA/native-root" "$ACHOST_DATA/containerd/root" "$ACHOST_DATA/containerd/state" "$ACHOST_DATA/bind-mounts" 2>/dev/null || true
 chmod 0755 "$MODDIR/post-fs-data.sh" "$MODDIR/service.sh" "$MODDIR/uninstall.sh" 2>/dev/null || true
 chmod 0755 "$ACHOST/bin"/* 2>/dev/null || true
+{prune_stale_runtime_entrypoints_function()}prune_stale_runtime_entrypoints "$ACHOST/bin"
 {docker_setup}"""
 
 

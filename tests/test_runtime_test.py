@@ -14,9 +14,10 @@ class RuntimeTestPlanTest(unittest.TestCase):
         self.assertEqual(report["target"], "all")
         self.assertEqual(report["script"], "/data/adb/achost/bin/runtime-test.sh")
         self.assertIn("MODE=all", report["command"])
-        self.assertIn("achost-docker-start", report["steps"])
+        self.assertIn("achost-docker-runtime start", report["steps"])
         self.assertIn("runtime-smoke-docker", report["steps"])
-        self.assertIn("achost-docker-stop", report["steps"])
+        self.assertIn("runtime-docker-feature-test", report["steps"])
+        self.assertIn("achost-docker-runtime stop", report["steps"])
         self.assertIn("runtime-smoke-lxc", report["steps"])
 
     def test_supports_kernelsu_module_root(self):
@@ -28,7 +29,8 @@ class RuntimeTestPlanTest(unittest.TestCase):
 
         self.assertEqual(report["target"], "docker")
         self.assertIn("/data/adb/modules/achost-runtime/achost/bin/runtime-test.sh", report["command"])
-        self.assertIn("container-nat-manager", report["steps"])
+        self.assertIn("achost-runtime-core net-reconcile", report["steps"])
+        self.assertIn("runtime-docker-feature-test", report["steps"])
         self.assertNotIn("runtime-smoke-lxc", report["steps"])
 
     def test_rejects_relative_android_paths(self):
