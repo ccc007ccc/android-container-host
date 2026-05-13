@@ -79,21 +79,11 @@ start_daemon_command() {
                     "$ACHOST_SUPERVISE" --launch --log-file "$start_daemon_log_file" --chroot "$start_daemon_chroot" -- "$@" && return 0
             fi
         fi
-        if [ "$ACHOST_RUNTIME_MODE" = "native" ]; then
-            printf 'error: achost-supervise client failed for %s; native mode requires private /run namespace\n' "$start_daemon_name" >&2
-            return 1
-        fi
-        printf 'warning: achost-supervise client failed for %s; falling back to direct launch\n' "$start_daemon_name" >&2
-    elif [ "$ACHOST_RUNTIME_MODE" = "native" ]; then
-        printf 'error: achost-supervise server unavailable for %s; native mode requires private /run namespace\n' "$start_daemon_name" >&2
+        printf 'error: achost-supervise client failed for %s\n' "$start_daemon_name" >&2
         return 1
     fi
-    if [ "$start_daemon_chroot" = "-" ]; then
-        "$@" >> "$start_daemon_log_file" 2>&1 &
-    else
-        chroot "$start_daemon_chroot" "$@" >> "$start_daemon_log_file" 2>&1 &
-    fi
-    printf '%s\n' "$!" > "$start_daemon_pid_file"
+    printf 'error: achost-supervise server unavailable for %s\n' "$start_daemon_name" >&2
+    return 1
 }
 
 dockerd_running() {

@@ -51,7 +51,8 @@ COMPOSE_STANDALONE_REL = "achost/bin/docker-compose"
 BUILDX_PLUGIN_REL = "achost/etc/docker/cli-plugins/docker-buildx"
 BUILDX_STANDALONE_REL = "achost/bin/docker-buildx"
 BUILDKIT_REQUIRED_BINARIES = ("buildctl", "buildkitd")
-SUPERVISOR_SOURCE = RUNTIME_ROOT / "native" / "achost-supervise.c"
+SUPERVISOR_CRATE = PROJECT_ROOT / "crates" / "achost-supervise"
+SUPERVISOR_TARGET = "aarch64-linux-android"
 SUPERVISOR_DEST = "achost/bin/achost-supervise"
 LXC_ALLOWED_ROOTS = ("bin", "lib", "lib64", "share")
 
@@ -310,47 +311,53 @@ def copy_text_file(
     return RuntimeFile(str(dst.relative_to(root)), str(src.relative_to(PROJECT_ROOT)), executable, category=category)
 
 
-def install_supervisor_helper(root: Path) -> tuple[dict[str, Any] | None, list[RuntimeFile]]:
-    if not SUPERVISOR_SOURCE.exists():
-        return None, []
+def install_supervisor_helper(root: Path) -> tuple[dict[str, Any], list[RuntimeFile]]:
+    if not SUPERVISOR_CRATE.exists():
+        raise FileNotFoundError(f"supervisor crate not found: {SUPERVISOR_CRATE}")
 
-    compiler = find_aarch64_compiler()
-    if compiler is None:
-        if os.environ.get("ACHOST_REQUIRE_SUPERVISOR") == "1":
-            raise FileNotFoundError("no Android arm64 compiler found for achost-supervise")
-        return None, []
+    cargo = shutil.which("cargo")
+    if cargo is None:
+        raise FileNotFoundError("cargo not found for Rust achost-supervise build")
+    linker = find_android_linker()
+    if linker is None:
+        raise FileNotFoundError("no Android NDK clang linker found for Rust achost-supervise")
 
-    dst = root / SUPERVISOR_DEST
-    dst.parent.mkdir(parents=True, exist_ok=True)
     command = [
-        compiler,
-        "-O2",
-        "-Wall",
-        "-Wextra",
-        "-fPIE",
-        "-pie",
-        "-o",
-        str(dst),
-        str(SUPERVISOR_SOURCE),
+        cargo,
+        "build",
+        "--release",
+        "--target",
+        SUPERVISOR_TARGET,
+        "--manifest-path",
+        str(PROJECT_ROOT / "Cargo.toml"),
+        "-p",
+        "achost-supervise",
     ]
+    env = os.environ.copy()
+    env["CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"] = linker
     try:
-        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
     except subprocess.CalledProcessError as exc:
         message = exc.stderr.strip() or exc.stdout.strip() or str(exc)
-        if os.environ.get("ACHOST_AARCH64_CC") or os.environ.get("ACHOST_REQUIRE_SUPERVISOR") == "1":
-            raise RuntimeError(f"failed to build achost-supervise: {message}") from exc
-        return None, []
+        raise RuntimeError(f"failed to build Rust achost-supervise: {message}") from exc
 
-    os.chmod(dst, 0o755)
+    built = PROJECT_ROOT / "target" / SUPERVISOR_TARGET / "release" / "achost-supervise"
+    if not built.exists():
+        raise FileNotFoundError(f"Rust achost-supervise build output missing: {built}")
+    dst = root / SUPERVISOR_DEST
+    copy_file(built, dst, 0o755)
     return {
-        "source": str(SUPERVISOR_SOURCE.relative_to(PROJECT_ROOT)),
-        "compiler": compiler,
+        "source": str(SUPERVISOR_CRATE.relative_to(PROJECT_ROOT)),
+        "implementation": "rust",
+        "builder": cargo,
+        "target": SUPERVISOR_TARGET,
+        "linker": linker,
         "path": SUPERVISOR_DEST,
-    }, [RuntimeFile(str(dst.relative_to(root)), str(SUPERVISOR_SOURCE.relative_to(PROJECT_ROOT)), True, category="supervisor")]
+    }, [RuntimeFile(str(dst.relative_to(root)), str(SUPERVISOR_CRATE.relative_to(PROJECT_ROOT)), True, category="supervisor")]
 
 
-def find_aarch64_compiler() -> str | None:
-    explicit = os.environ.get("ACHOST_AARCH64_CC")
+def find_android_linker() -> str | None:
+    explicit = os.environ.get("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER") or os.environ.get("ACHOST_ANDROID_LINKER")
     if explicit:
         explicit_path = Path(explicit).expanduser()
         if explicit_path.exists():
@@ -358,7 +365,7 @@ def find_aarch64_compiler() -> str | None:
         found = shutil.which(explicit)
         if found:
             return found
-        raise FileNotFoundError(f"ACHOST_AARCH64_CC not found: {explicit}")
+        raise FileNotFoundError(f"Android linker not found: {explicit}")
 
     names = (
         "aarch64-linux-android35-clang",
@@ -371,7 +378,6 @@ def find_aarch64_compiler() -> str | None:
         "aarch64-linux-android24-clang",
         "aarch64-linux-android23-clang",
         "aarch64-linux-android21-clang",
-        "aarch64-linux-gnu-gcc",
     )
     for name in names:
         found = shutil.which(name)
@@ -859,7 +865,10 @@ def format_runtime_install_report(report: dict[str, Any]) -> str:
                 lines.append(f"  - {name}: not included")
         supervisor = assets.get("supervisor")
         if supervisor:
-            lines.append(f"  - supervisor: {supervisor['path']} compiler={supervisor['compiler']}")
+            lines.append(
+                f"  - supervisor: {supervisor['path']} implementation={supervisor['implementation']} "
+                f"target={supervisor['target']} linker={supervisor['linker']}"
+            )
         else:
             lines.append("  - supervisor: not included")
         if assets.get("start_docker_on_boot"):
