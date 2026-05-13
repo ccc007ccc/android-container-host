@@ -2,7 +2,7 @@ use std::env;
 use std::ffi::CString;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -29,6 +29,80 @@ const FILTER_DELETE_CHAINS: &[&str] = &[
     "DOCKER-ISOLATION-STAGE-1",
     "DOCKER-ISOLATION",
 ];
+
+#[derive(Debug)]
+struct DockerRuntimeConfig {
+    runtime_mode: String,
+    use_chroot: bool,
+    chroot: PathBuf,
+    native_root: PathBuf,
+    run: PathBuf,
+    docker_root: PathBuf,
+    containerd_root: PathBuf,
+    containerd_state: PathBuf,
+    supervisor_pid: PathBuf,
+    docker_socket: Option<PathBuf>,
+    compat_host: Option<String>,
+    compat_socket: Option<PathBuf>,
+    containerd_address: PathBuf,
+    dns_servers: Vec<String>,
+    dockerd_pid: PathBuf,
+    dockerd_launch_pid: PathBuf,
+    containerd_pid: PathBuf,
+}
+
+impl DockerRuntimeConfig {
+    fn from_env() -> Self {
+        let achost = env_path("ACHOST").unwrap_or_else(|| PathBuf::from("/data/adb/achost"));
+        let achost_var = env_path("ACHOST_VAR").unwrap_or_else(|| achost.join("var"));
+        let run = env_path("ACHOST_RUN").unwrap_or_else(|| achost_var.join("run"));
+        let runtime_mode = env::var("ACHOST_RUNTIME_MODE").unwrap_or_else(|_| "native".to_string());
+        let use_chroot = match env::var("ACHOST_USE_CHROOT") {
+            Ok(value) => value == "1",
+            Err(_) => runtime_mode == "chroot",
+        };
+        let docker_socket = match env::var("DOCKER_HOST") {
+            Ok(value) => unix_socket_path(&value),
+            Err(env::VarError::NotPresent) => Some(run.join("docker.sock")),
+            Err(env::VarError::NotUnicode(_)) => None,
+        };
+        let compat_host = env::var("ACHOST_DOCKER_COMPAT_HOST")
+            .ok()
+            .filter(|value| !matches!(value.as_str(), "" | "0" | "none"));
+        let compat_socket = compat_host.as_deref().and_then(unix_socket_path);
+        Self {
+            runtime_mode,
+            use_chroot,
+            chroot: env_path("ACHOST_CHROOT").unwrap_or_else(|| achost_var.join("chroot")),
+            native_root: env_path("ACHOST_NATIVE_ROOT")
+                .unwrap_or_else(|| achost_var.join("native-root")),
+            run: run.clone(),
+            docker_root: env_path("ACHOST_DOCKER_ROOT")
+                .unwrap_or_else(|| achost_var.join("docker")),
+            containerd_root: env_path("ACHOST_CONTAINERD_ROOT")
+                .unwrap_or_else(|| achost_var.join("containerd/root")),
+            containerd_state: env_path("ACHOST_CONTAINERD_STATE")
+                .unwrap_or_else(|| achost_var.join("containerd/state")),
+            supervisor_pid: env_path("ACHOST_SUPERVISOR_PID")
+                .unwrap_or_else(|| run.join("achost-supervise.pid")),
+            docker_socket,
+            compat_host,
+            compat_socket,
+            containerd_address: env_path("CONTAINERD_ADDRESS")
+                .unwrap_or_else(|| run.join("containerd.sock")),
+            dns_servers: env::var("ACHOST_DNS_SERVERS")
+                .unwrap_or_else(|_| "1.1.1.1 8.8.8.8".to_string())
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
+            dockerd_pid: env_path("ACHOST_DOCKERD_PID").unwrap_or_else(|| run.join("dockerd.pid")),
+            dockerd_launch_pid: env_path("ACHOST_DOCKERD_LAUNCH_PID")
+                .unwrap_or_else(|| run.join("dockerd-launch.pid")),
+            containerd_pid: env_path("ACHOST_CONTAINERD_PID")
+                .unwrap_or_else(|| run.join("containerd.pid")),
+        }
+    }
+}
 
 #[derive(Debug)]
 struct DockerStopConfig {
@@ -82,17 +156,371 @@ fn main() {
             cleanup_stale_iptables();
             0
         }
+        Some("prepare-native-root") => run_prepare_native_root(),
+        Some("native-preflight") => run_native_preflight(),
+        Some("prepare-compat-socket") => run_prepare_compat_socket(),
+        Some("namespace-diagnostics") => run_namespace_diagnostics(),
         Some("stop") => run_stop(),
         Some(command) => {
             eprintln!("unsupported command: {command}");
             2
         }
         None => {
-            eprintln!("usage: achost-docker-runtime <cleanup-stale-iptables|stop>");
+            eprintln!("usage: achost-docker-runtime <cleanup-stale-iptables|prepare-native-root|native-preflight|prepare-compat-socket|namespace-diagnostics|stop>");
             2
         }
     };
     std::process::exit(code);
+}
+
+fn run_prepare_native_root() -> i32 {
+    let config = DockerRuntimeConfig::from_env();
+    if let Err(error) = prepare_native_root(&config) {
+        eprintln!("prepare native root failed: {error}");
+        return 1;
+    }
+    0
+}
+
+fn run_native_preflight() -> i32 {
+    let config = DockerRuntimeConfig::from_env();
+    native_preflight(&config);
+    0
+}
+
+fn run_prepare_compat_socket() -> i32 {
+    let config = DockerRuntimeConfig::from_env();
+    let Some(host) = prepare_compat_socket(&config) else {
+        return 0;
+    };
+    println!("{host}");
+    0
+}
+
+fn run_namespace_diagnostics() -> i32 {
+    let config = DockerRuntimeConfig::from_env();
+    namespace_diagnostics(&config);
+    0
+}
+
+fn prepare_native_root(config: &DockerRuntimeConfig) -> std::io::Result<()> {
+    fs::create_dir_all(&config.native_root)?;
+    fs::create_dir_all(config.native_root.join("etc"))?;
+    fs::create_dir_all(config.native_root.join("run"))?;
+    fs::create_dir_all(config.native_root.join("tmp"))?;
+    fs::create_dir_all(config.native_root.join("var"))?;
+    symlink_replace(Path::new("/run"), &config.native_root.join("var/run"));
+    write_native_resolv_conf(config)?;
+    setup_native_ca_certs(config);
+    Ok(())
+}
+
+fn write_native_resolv_conf(config: &DockerRuntimeConfig) -> std::io::Result<()> {
+    let etc = config.native_root.join("etc");
+    fs::create_dir_all(&etc)?;
+    let resolv_conf = config
+        .dns_servers
+        .iter()
+        .map(|server| format!("nameserver {server}\n"))
+        .collect::<String>();
+    fs::write(etc.join("resolv.conf"), resolv_conf)?;
+    fs::write(etc.join("hosts"), "127.0.0.1 localhost\n::1 localhost\n")
+}
+
+fn setup_native_ca_certs(config: &DockerRuntimeConfig) {
+    let system_certs = Path::new("/system/etc/security/cacerts");
+    if !system_certs.is_dir() {
+        return;
+    }
+    let ssl = config.native_root.join("etc/ssl");
+    fs::create_dir_all(&ssl).ok();
+    symlink_replace(system_certs, &ssl.join("certs"));
+}
+
+fn prepare_compat_socket(config: &DockerRuntimeConfig) -> Option<String> {
+    let host = config.compat_host.as_deref()?;
+    let compat_socket = config.compat_socket.as_deref()?;
+    if config.docker_socket.as_deref() == Some(compat_socket) {
+        return None;
+    }
+
+    if let Some(root) = compat_root(config) {
+        if path_starts_with(compat_socket, Path::new("/var/run")) {
+            fs::create_dir_all(root.join("run")).ok();
+            fs::create_dir_all(root.join("var")).ok();
+            let var_run = root.join("var/run");
+            remove_file_quiet(&var_run);
+            symlink(Path::new("/run"), &var_run).ok();
+            if let Ok(suffix) = compat_socket.strip_prefix("/var/run") {
+                remove_file_quiet(
+                    &root
+                        .join("run")
+                        .join(suffix.strip_prefix("/").unwrap_or(suffix)),
+                );
+            }
+        } else if compat_socket.is_absolute() {
+            if let Some(parent) = compat_socket.parent() {
+                fs::create_dir_all(root.join(strip_absolute(parent))).ok();
+            }
+            remove_file_quiet(&root.join(strip_absolute(compat_socket)));
+        }
+        return Some(host.to_string());
+    }
+
+    if let Some(parent) = compat_socket.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            eprintln!(
+                "warning: unable to create Docker compatibility socket dir: {}: {error}",
+                parent.display()
+            );
+            return None;
+        }
+    }
+    remove_file_quiet(compat_socket);
+    Some(host.to_string())
+}
+
+fn compat_root(config: &DockerRuntimeConfig) -> Option<&Path> {
+    if config.use_chroot {
+        Some(&config.chroot)
+    } else if config.runtime_mode == "native" {
+        Some(&config.native_root)
+    } else {
+        None
+    }
+}
+
+fn native_preflight(config: &DockerRuntimeConfig) {
+    println!("native_path_run={}", config.run.display());
+    println!("native_path_native_root={}", config.native_root.display());
+    println!("native_path_docker_root={}", config.docker_root.display());
+    println!(
+        "native_path_containerd_root={}",
+        config.containerd_root.display()
+    );
+    println!(
+        "native_path_containerd_state={}",
+        config.containerd_state.display()
+    );
+    print_path_state(Path::new("/run"));
+    print_path_state(Path::new("/var/run"));
+    print_path_state(Path::new("/sys/fs/cgroup"));
+    if mount_is_present(Path::new("/run")) {
+        println!("global_run_mount=present");
+    } else {
+        println!("global_run_mount=absent");
+    }
+
+    if let Some(pid) = pid_from_file(&config.supervisor_pid).filter(|pid| pid_alive(*pid)) {
+        println!("supervisor_pid={pid}");
+        let root = PathBuf::from(format!("/proc/{pid}/root"));
+        print_path_state(&root.join("run"));
+        print_path_state(&root.join("var/run"));
+        print_path_state(&root.join("sys/fs/cgroup"));
+        print_path_state(&root.join("sys/fs/cgroup/memory/memory.limit_in_bytes"));
+        print_path_state(&root.join("sys/fs/cgroup/cpuset/cpuset.cpus"));
+        if let Some(socket) = config.docker_socket.as_deref() {
+            print_path_state(&root.join(strip_absolute(socket)));
+        }
+        print_path_state(&root.join(strip_absolute(&config.containerd_address)));
+        let var_run = root.join("var/run");
+        if var_run.exists() {
+            println!(
+                "native_var_run_target={}",
+                fs::read_link(&var_run)
+                    .map(|path| path_string(&path))
+                    .unwrap_or_default()
+            );
+        }
+        let ns = PathBuf::from(format!("/proc/{pid}/ns/mnt"));
+        if ns.exists() {
+            println!(
+                "supervisor_mnt_ns={}",
+                fs::read_link(ns)
+                    .map(|path| path_string(&path))
+                    .unwrap_or_default()
+            );
+        }
+    } else {
+        println!("supervisor=not-running");
+    }
+
+    print_cgroup_diagnostics();
+}
+
+fn namespace_diagnostics(config: &DockerRuntimeConfig) {
+    if config.runtime_mode != "native" {
+        return;
+    }
+    let Some(supervisor_pid) = pid_from_file(&config.supervisor_pid).filter(|pid| pid_alive(*pid))
+    else {
+        return;
+    };
+    let supervisor_ns = mount_namespace(supervisor_pid).unwrap_or_default();
+    for (name, pid_file) in [
+        ("containerd", &config.containerd_pid),
+        ("dockerd", &config.dockerd_pid),
+        ("dockerd_launch", &config.dockerd_launch_pid),
+    ] {
+        let Some(pid) = pid_from_file(pid_file) else {
+            continue;
+        };
+        let daemon_ns = mount_namespace(pid).unwrap_or_default();
+        if !supervisor_ns.is_empty() && daemon_ns == supervisor_ns {
+            println!("{name}_mnt_ns={daemon_ns} match=1");
+        } else {
+            println!("{name}_mnt_ns={daemon_ns} match=0 supervisor={supervisor_ns}");
+        }
+    }
+}
+
+fn print_cgroup_diagnostics() {
+    if has_cgroup_mount("devices") {
+        println!("devices_cgroup=mounted");
+    } else if cgroup_controller_available("devices") {
+        println!("devices_cgroup=available-not-mounted");
+    } else {
+        println!("devices_cgroup=unavailable");
+    }
+
+    if let Some(path) = cgroup_v1_mount_point("memory", Some(Path::new("/dev/memcg"))) {
+        println!("memory_cgroup=mounted path={}", path.display());
+    } else if cgroup_controller_available("memory") {
+        println!("memory_cgroup=available-not-mounted");
+    } else {
+        println!("memory_cgroup=unavailable");
+    }
+
+    print_path_state(Path::new("/dev/memcg"));
+    print_path_state(Path::new("/dev/memcg/memory.limit_in_bytes"));
+
+    if let Ok(controllers) = fs::read_to_string("/sys/fs/cgroup/cgroup.controllers") {
+        let controllers = controllers.trim_end();
+        println!("cgroup2_controllers={controllers}");
+        if controllers
+            .split_whitespace()
+            .any(|value| value == "memory")
+        {
+            println!("cgroup2_memory=present");
+        } else {
+            println!("cgroup2_memory=absent");
+        }
+    }
+
+    for mount in read_mount_records() {
+        if mount.fs_type == "cgroup" || mount.fs_type == "cgroup2" {
+            println!(
+                "cgroup_mount={}:{}:{}",
+                mount.destination, mount.fs_type, mount.options
+            );
+        }
+    }
+
+    if read_mount_records()
+        .into_iter()
+        .any(|mount| mount.destination == "/sys/fs/cgroup" && mount.fs_type == "cgroup2")
+    {
+        cgroup2_diagnostics(Path::new("/sys/fs/cgroup"));
+    }
+}
+
+fn cgroup2_diagnostics(prefix: &Path) {
+    println!("cgroup2_path={}", prefix.display());
+    for file in [
+        "cgroup.controllers",
+        "cgroup.subtree_control",
+        "cgroup.type",
+        "memory.current",
+        "memory.max",
+        "memory.swap.current",
+        "memory.swap.max",
+        "memory.oom.group",
+    ] {
+        let path = prefix.join(file);
+        match fs::read_to_string(&path) {
+            Ok(value) => println!("cgroup2_{file}={}", value.trim_end()),
+            Err(_) => println!("cgroup2_{file}=missing"),
+        }
+    }
+}
+
+fn has_cgroup_mount(controller: &str) -> bool {
+    cgroup_v1_mount_point(controller, None).is_some()
+}
+
+fn cgroup_controller_available(controller: &str) -> bool {
+    let Ok(cgroups) = fs::read_to_string("/proc/cgroups") else {
+        return false;
+    };
+    cgroups.lines().any(|line| {
+        let mut parts = line.split_whitespace();
+        matches!(
+            (parts.next(), parts.next(), parts.next(), parts.next()),
+            (Some(name), Some(_), Some(_), Some("1")) if name == controller
+        )
+    })
+}
+
+fn cgroup_v1_mount_point(controller: &str, preferred: Option<&Path>) -> Option<PathBuf> {
+    let mounts = read_mount_records();
+    if let Some(preferred) = preferred {
+        let preferred = path_string(preferred);
+        if let Some(mount) = mounts.iter().find(|mount| {
+            mount.destination == preferred
+                && mount.fs_type == "cgroup"
+                && mount.options.split(',').any(|option| option == controller)
+        }) {
+            return Some(PathBuf::from(&mount.destination));
+        }
+    }
+    mounts
+        .into_iter()
+        .find(|mount| {
+            mount.fs_type == "cgroup" && mount.options.split(',').any(|option| option == controller)
+        })
+        .map(|mount| PathBuf::from(mount.destination))
+}
+
+fn print_path_state(path: &Path) {
+    if path.exists() {
+        if writable(path) {
+            println!("{}=present,writable", path.display());
+        } else {
+            println!("{}=present,not-writable", path.display());
+        }
+    } else {
+        println!("{}=missing", path.display());
+    }
+}
+
+fn writable(path: &Path) -> bool {
+    let Some(c_path) = c_path(path) else {
+        return false;
+    };
+    unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
+}
+
+fn symlink_replace(src: &Path, dst: &Path) {
+    remove_path_quiet(dst);
+    symlink(src, dst).ok();
+}
+
+fn strip_absolute(path: &Path) -> &Path {
+    path.strip_prefix("/").unwrap_or(path)
+}
+
+fn path_starts_with(path: &Path, prefix: &Path) -> bool {
+    path == prefix || path.starts_with(prefix)
+}
+
+fn mount_namespace(pid: u32) -> Option<String> {
+    fs::read_link(format!("/proc/{pid}/ns/mnt"))
+        .ok()
+        .map(|path| path_string(&path))
+}
+
+fn pid_from_file(pid_file: &Path) -> Option<u32> {
+    parse_pid(read_trimmed(pid_file)?.as_str())
 }
 
 fn run_stop() -> i32 {
@@ -315,14 +743,38 @@ fn chroot_mounts(chroot: &Path) -> Vec<PathBuf> {
     mounts
 }
 
+#[derive(Debug)]
+struct MountRecord {
+    destination: String,
+    fs_type: String,
+    options: String,
+}
+
 fn read_mount_destinations() -> Vec<String> {
+    read_mount_records()
+        .into_iter()
+        .map(|mount| mount.destination)
+        .collect()
+}
+
+fn read_mount_records() -> Vec<MountRecord> {
     let Ok(mounts) = fs::read_to_string("/proc/mounts") else {
         return Vec::new();
     };
     mounts
         .lines()
-        .filter_map(|line| line.split_whitespace().nth(1))
-        .map(decode_mount_field)
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let _source = parts.next()?;
+            let destination = decode_mount_field(parts.next()?);
+            let fs_type = parts.next()?.to_string();
+            let options = parts.next()?.to_string();
+            Some(MountRecord {
+                destination,
+                fs_type,
+                options,
+            })
+        })
         .collect()
 }
 
@@ -450,6 +902,17 @@ fn read_trimmed(path: &Path) -> Option<String> {
 
 fn remove_file_quiet(path: &Path) {
     fs::remove_file(path).ok();
+}
+
+fn remove_path_quiet(path: &Path) {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path).ok();
+    } else {
+        fs::remove_file(path).ok();
+    }
 }
 
 fn env_path(name: &str) -> Option<PathBuf> {

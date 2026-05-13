@@ -221,127 +221,6 @@ ensure_host_memory_cgroup() {
     printf '/dev/memcg\n'
 }
 
-path_state() {
-    path_state_path="$1"
-    if [ -e "$path_state_path" ]; then
-        if [ -w "$path_state_path" ]; then
-            printf '%s=present,writable\n' "$path_state_path"
-        else
-            printf '%s=present,not-writable\n' "$path_state_path"
-        fi
-    else
-        printf '%s=missing\n' "$path_state_path"
-    fi
-}
-
-cgroup2_mounted_at() {
-    cgroup2_mount_path="$1"
-    while read -r _mount_src mount_dst mount_type _mount_opts _rest; do
-        [ "$mount_dst" = "$cgroup2_mount_path" ] && [ "$mount_type" = "cgroup2" ] && return 0
-    done < /proc/mounts
-    return 1
-}
-
-cgroup2_root_available() {
-    cgroup2_mounted_at /sys/fs/cgroup
-}
-
-cgroup2_diagnostics() {
-    cgroup2_prefix="$1"
-    printf 'cgroup2_path=%s\n' "$cgroup2_prefix"
-    for cgroup2_file in cgroup.controllers cgroup.subtree_control cgroup.type memory.current memory.max memory.swap.current memory.swap.max memory.oom.group; do
-        if [ -r "$cgroup2_prefix/$cgroup2_file" ]; then
-            printf 'cgroup2_%s=' "$cgroup2_file"
-            cat "$cgroup2_prefix/$cgroup2_file" 2>/dev/null || true
-        else
-            printf 'cgroup2_%s=missing\n' "$cgroup2_file"
-        fi
-    done
-}
-
-native_preflight() {
-    printf 'native_path_run=%s\n' "$ACHOST_RUN"
-    printf 'native_path_native_root=%s\n' "$ACHOST_NATIVE_ROOT"
-    printf 'native_path_docker_root=%s\n' "$ACHOST_DOCKER_ROOT"
-    printf 'native_path_containerd_root=%s\n' "$ACHOST_CONTAINERD_ROOT"
-    printf 'native_path_containerd_state=%s\n' "$ACHOST_CONTAINERD_STATE"
-    path_state /run
-    path_state /var/run
-    path_state /sys/fs/cgroup
-    if grep -q ' /run ' /proc/mounts 2>/dev/null; then
-        printf 'global_run_mount=present\n'
-    else
-        printf 'global_run_mount=absent\n'
-    fi
-    if supervisor_server_running; then
-        supervisor_pid="$(cat "$ACHOST_SUPERVISOR_PID" 2>/dev/null || true)"
-        printf 'supervisor_pid=%s\n' "$supervisor_pid"
-        path_state "/proc/$supervisor_pid/root/run"
-        path_state "/proc/$supervisor_pid/root/var/run"
-        path_state "/proc/$supervisor_pid/root/sys/fs/cgroup"
-        path_state "/proc/$supervisor_pid/root/sys/fs/cgroup/memory/memory.limit_in_bytes"
-        path_state "/proc/$supervisor_pid/root/sys/fs/cgroup/cpuset/cpuset.cpus"
-        path_state "/proc/$supervisor_pid/root${DOCKER_HOST#unix://}"
-        path_state "/proc/$supervisor_pid/root$CONTAINERD_ADDRESS"
-        if [ -e "/proc/$supervisor_pid/root/var/run" ]; then
-            printf 'native_var_run_target=%s\n' "$(readlink "/proc/$supervisor_pid/root/var/run" 2>/dev/null || true)"
-        fi
-        if [ -e "/proc/$supervisor_pid/ns/mnt" ]; then
-            printf 'supervisor_mnt_ns=%s\n' "$(readlink "/proc/$supervisor_pid/ns/mnt" 2>/dev/null || true)"
-        fi
-    else
-        printf 'supervisor=not-running\n'
-    fi
-    if has_devices_cgroup_mount; then
-        printf 'devices_cgroup=mounted\n'
-    elif cgroup_devices_available; then
-        printf 'devices_cgroup=available-not-mounted\n'
-    else
-        printf 'devices_cgroup=unavailable\n'
-    fi
-    if memory_mount="$(cgroup_v1_mount_point memory /dev/memcg)"; then
-        printf 'memory_cgroup=mounted path=%s\n' "$memory_mount"
-    elif cgroup_controller_available memory; then
-        printf 'memory_cgroup=available-not-mounted\n'
-    else
-        printf 'memory_cgroup=unavailable\n'
-    fi
-    path_state /dev/memcg
-    path_state /dev/memcg/memory.limit_in_bytes
-    if [ -r /sys/fs/cgroup/cgroup.controllers ]; then
-        cgroup2_controllers="$(cat /sys/fs/cgroup/cgroup.controllers 2>/dev/null || true)"
-        printf 'cgroup2_controllers=%s\n' "$cgroup2_controllers"
-        case " $cgroup2_controllers " in
-            *' memory '*) printf 'cgroup2_memory=present\n' ;;
-            *) printf 'cgroup2_memory=absent\n' ;;
-        esac
-    fi
-    awk '$3 == "cgroup" || $3 == "cgroup2" { print "cgroup_mount=" $2 ":" $3 ":" $4 }' /proc/mounts 2>/dev/null || true
-    cgroup2_root_available && cgroup2_diagnostics /sys/fs/cgroup
-}
-
-daemon_namespace_diagnostics() {
-    [ "$ACHOST_RUNTIME_MODE" = "native" ] || return 0
-    supervisor_server_running || return 0
-    supervisor_pid="$(cat "$ACHOST_SUPERVISOR_PID" 2>/dev/null || true)"
-    supervisor_ns="$(readlink "/proc/$supervisor_pid/ns/mnt" 2>/dev/null || true)"
-    for item in "containerd:$ACHOST_CONTAINERD_PID" "dockerd:$ACHOST_DOCKERD_PID" "dockerd_launch:$ACHOST_DOCKERD_LAUNCH_PID"; do
-        daemon_name="${item%%:*}"
-        daemon_pid_file="${item#*:}"
-        [ -r "$daemon_pid_file" ] || continue
-        daemon_pid="$(cat "$daemon_pid_file" 2>/dev/null || true)"
-        case "$daemon_pid" in
-            ''|*[!0-9]*) continue ;;
-        esac
-        daemon_ns="$(readlink "/proc/$daemon_pid/ns/mnt" 2>/dev/null || true)"
-        if [ -n "$supervisor_ns" ] && [ "$daemon_ns" = "$supervisor_ns" ]; then
-            printf '%s_mnt_ns=%s match=1\n' "$daemon_name" "$daemon_ns"
-        else
-            printf '%s_mnt_ns=%s match=0 supervisor=%s\n' "$daemon_name" "$daemon_ns" "$supervisor_ns"
-        fi
-    done
-}
-
 bind_chroot_path() {
     src="$1"
     bind_mount "$src" "$(chroot_path "$src")"
@@ -353,32 +232,6 @@ write_chroot_resolv_conf() {
     for server in $ACHOST_DNS_SERVERS; do
         printf 'nameserver %s\n' "$server" >> "$ACHOST_CHROOT/etc/resolv.conf"
     done
-}
-
-write_native_resolv_conf() {
-    mkdir -p "$ACHOST_NATIVE_ROOT/etc"
-    : > "$ACHOST_NATIVE_ROOT/etc/resolv.conf"
-    for server in $ACHOST_DNS_SERVERS; do
-        printf 'nameserver %s\n' "$server" >> "$ACHOST_NATIVE_ROOT/etc/resolv.conf"
-    done
-    cat > "$ACHOST_NATIVE_ROOT/etc/hosts" <<EOF
-127.0.0.1 localhost
-::1 localhost
-EOF
-}
-
-setup_native_ca_certs() {
-    [ -d /system/etc/security/cacerts ] || return 0
-    mkdir -p "$ACHOST_NATIVE_ROOT/etc/ssl"
-    rm -rf "$ACHOST_NATIVE_ROOT/etc/ssl/certs" 2>/dev/null || true
-    ln -s /system/etc/security/cacerts "$ACHOST_NATIVE_ROOT/etc/ssl/certs" 2>/dev/null || true
-}
-
-setup_native_root_files() {
-    mkdir -p "$ACHOST_NATIVE_ROOT" "$ACHOST_NATIVE_ROOT/etc" "$ACHOST_NATIVE_ROOT/run" "$ACHOST_NATIVE_ROOT/tmp" "$ACHOST_NATIVE_ROOT/var"
-    ln -sfn /run "$ACHOST_NATIVE_ROOT/var/run" 2>/dev/null || true
-    write_native_resolv_conf
-    setup_native_ca_certs
 }
 
 setup_chroot_ca_certs() {
@@ -575,51 +428,6 @@ imports = []
 EOF
 }
 
-prepare_docker_compat_socket() {
-    case "${ACHOST_DOCKER_COMPAT_HOST:-}" in
-        ''|0|none)
-            ACHOST_DOCKER_COMPAT_HOST=""
-            return 0
-            ;;
-        unix://*) ;;
-        *) return 0 ;;
-    esac
-    compat_socket="${ACHOST_DOCKER_COMPAT_HOST#unix://}"
-    case "$DOCKER_HOST" in
-        unix://*) primary_socket="${DOCKER_HOST#unix://}" ;;
-        *) primary_socket="" ;;
-    esac
-    [ -n "$compat_socket" ] || { ACHOST_DOCKER_COMPAT_HOST=""; return 0; }
-    [ "$compat_socket" != "$primary_socket" ] || { ACHOST_DOCKER_COMPAT_HOST=""; return 0; }
-    compat_dir="${compat_socket%/*}"
-    compat_root=""
-    if [ "$ACHOST_USE_CHROOT" = "1" ]; then
-        compat_root="$ACHOST_CHROOT"
-    elif [ "$ACHOST_RUNTIME_MODE" = "native" ]; then
-        compat_root="$ACHOST_NATIVE_ROOT"
-    fi
-    if [ -n "$compat_root" ]; then
-        case "$compat_socket" in
-            /var/run/*)
-                mkdir -p "$compat_root/run" "$compat_root/var" 2>/dev/null || true
-                ln -sfn /run "$compat_root/var/run" 2>/dev/null || true
-                rm -f "$compat_root/run/${compat_socket#/var/run/}" 2>/dev/null || true
-                ;;
-            /*)
-                mkdir -p "$compat_root$compat_dir" 2>/dev/null || true
-                rm -f "$compat_root$compat_socket" 2>/dev/null || true
-                ;;
-        esac
-        return 0
-    fi
-    if ! mkdir -p "$compat_dir" 2>/dev/null; then
-        printf 'warning: unable to create Docker compatibility socket dir: %s\n' "$compat_dir" >&2
-        ACHOST_DOCKER_COMPAT_HOST=""
-        return 0
-    fi
-    rm -f "$compat_socket" 2>/dev/null || true
-}
-
 start_containerd_daemon() {
     if [ "$ACHOST_USE_CHROOT" = "1" ]; then
         start_daemon_command containerd "$ACHOST_CONTAINERD_PID" "$ACHOST_CONTAINERD_LOG" "$ACHOST_CHROOT" \
@@ -678,11 +486,11 @@ fi
 if [ "$ACHOST_USE_CHROOT" = "1" ]; then
     setup_chroot
 else
-    setup_native_root_files
+    "$ACHOST_DOCKER_RUNTIME" prepare-native-root
     setup_devices_cgroup
     ensure_host_memory_cgroup >/dev/null || true
     ensure_supervisor_server || printf 'warning: native supervisor server not ready; private /run unavailable\n' >&2
-    native_preflight
+    "$ACHOST_DOCKER_RUNTIME" native-preflight
 fi
 
 COMMON_BIN="${ACHOST_COMMON_BIN:-$ACHOST_BIN}"
@@ -715,7 +523,7 @@ else
 fi
 
 write_dockerd_config
-prepare_docker_compat_socket
+ACHOST_DOCKER_COMPAT_HOST="$("$ACHOST_DOCKER_RUNTIME" prepare-compat-socket)"
 
 if dockerd_running; then
     printf 'dockerd already running pid=%s\n' "$(dockerd_pid_for_display)"
@@ -737,7 +545,7 @@ else
     fi
 fi
 
-daemon_namespace_diagnostics
+"$ACHOST_DOCKER_RUNTIME" namespace-diagnostics
 
 if reconcile_network_once; then
     printf 'network reconciled bridge=%s\n' "$CONTAINER_BRIDGE"
