@@ -419,17 +419,23 @@ docker_socket_path() {
 rewrite_docker_mount() {
     docker_socket="$(docker_socket_path)"
     case "$1" in
-        /var/run/docker.sock)
+        /var/run/docker.sock|/run/docker.sock)
             printf '%s' "$docker_socket"
             ;;
-        /var/run/docker.sock:*)
+        /var/run/docker.sock:*|/run/docker.sock:*)
             printf '%s:%s' "$docker_socket" "${1#*:}"
             ;;
         type=bind,source=/var/run/docker.sock,*)
             printf 'type=bind,source=%s,%s' "$docker_socket" "${1#type=bind,source=/var/run/docker.sock,}"
             ;;
+        type=bind,source=/run/docker.sock,*)
+            printf 'type=bind,source=%s,%s' "$docker_socket" "${1#type=bind,source=/run/docker.sock,}"
+            ;;
         type=bind,src=/var/run/docker.sock,*)
             printf 'type=bind,src=%s,%s' "$docker_socket" "${1#type=bind,src=/var/run/docker.sock,}"
+            ;;
+        type=bind,src=/run/docker.sock,*)
+            printf 'type=bind,src=%s,%s' "$docker_socket" "${1#type=bind,src=/run/docker.sock,}"
             ;;
         *)
             printf '%s' "$1"

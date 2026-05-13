@@ -15,6 +15,19 @@ type StatusData = {
   dockerd_pid: string;
   containerd_pid: string;
   cgroup_version: string;
+  configured_cgroup_mode: string;
+  cgroup_mount: string;
+  runtime_mode: string;
+  dns_servers: string;
+  resolv_conf: string;
+  resolv_nameservers: string;
+  bridge: string;
+  bridge_subnet: string;
+  bridge_route: string;
+  route_status: string;
+  return_policy_rule: string;
+  source_policy_rule: string;
+  uplink: string;
   storage_driver: string;
   server_version: string;
   containers_total: number;
@@ -406,6 +419,29 @@ function renderDiagnostics(): string {
         <button data-action="check" ${busy ? 'disabled' : ''}>运行 runtime check</button>
         <button data-action="daemon-logs" ${busy ? 'disabled' : ''}>查看 daemon 日志</button>
         <button data-action="refresh" ${busy ? 'disabled' : ''}>刷新状态</button>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Android compatibility</p>
+          <h2>非常规环境状态</h2>
+        </div>
+        <span class="badge ${statusData?.route_status === 'ok' ? 'green' : 'slate'}">路由 ${escapeHtml(statusData?.route_status || 'unknown')}</span>
+      </div>
+      <div class="detail-grid diagnostics-grid">
+        ${detailItem('Runtime mode', statusData?.runtime_mode)}
+        ${detailItem('Cgroup mode', statusData?.configured_cgroup_mode || statusData?.cgroup_version)}
+        ${detailItem('Host cgroup', statusData?.cgroup_mount)}
+        ${detailItem('DNS servers', statusData?.dns_servers || statusData?.resolv_nameservers)}
+        ${detailItem('resolv.conf', statusData?.resolv_conf)}
+        ${detailItem('resolv nameservers', statusData?.resolv_nameservers)}
+        ${detailItem('Bridge', statusData?.bridge)}
+        ${detailItem('Bridge subnet', statusData?.bridge_subnet)}
+        ${detailItem('Bridge route', statusData?.bridge_route)}
+        ${detailItem('Return policy', statusData?.return_policy_rule)}
+        ${detailItem('Source policy', statusData?.source_policy_rule)}
+        ${detailItem('Uplink', statusData?.uplink)}
       </div>
     </section>
     <section class="panel output-panel">

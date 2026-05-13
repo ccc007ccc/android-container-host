@@ -27,6 +27,15 @@ ACHOST_COMMON_BIN="${ACHOST_COMMON_BIN:-$ACHOST_COMMON/bin}"
 DOCKER="$ACHOST_BIN/docker"
 FIELD_SEP="|"
 ACHOST_CONFIG="${ACHOST_CONFIG:-$ACHOST_VAR/config}"
+ACHOST_RUNTIME_MODE="${ACHOST_RUNTIME_MODE:-}"
+ACHOST_CGROUP_MODE="${ACHOST_CGROUP_MODE:-}"
+ACHOST_USE_CHROOT="${ACHOST_USE_CHROOT:-0}"
+ACHOST_CHROOT="${ACHOST_CHROOT:-$ACHOST_VAR/chroot}"
+ACHOST_NATIVE_ROOT="${ACHOST_NATIVE_ROOT:-$ACHOST_VAR/native-root}"
+ACHOST_DNS_SERVERS="${ACHOST_DNS_SERVERS:-}"
+CONTAINER_BRIDGE="${CONTAINER_BRIDGE:-${DOCKER_BRIDGE:-docker0}}"
+RETURN_RULE_PRIORITY="${ACHOST_CONTAINER_RETURN_RULE_PRIORITY:-11999}"
+SOURCE_RULE_PRIORITY="${ACHOST_CONTAINER_SOURCE_RULE_PRIORITY:-12000}"
 AUTOSTART_FILE="$ACHOST_CONFIG/docker.autostart"
 
 json_escape() {
@@ -147,6 +156,62 @@ autostart_value() {
     fi
 }
 
+cgroup_mount_value() {
+    if [ -d /dev/memcg ]; then
+        printf '/dev/memcg'
+    elif [ -d /sys/fs/cgroup/memory ]; then
+        printf '/sys/fs/cgroup/memory'
+    elif [ -d /sys/fs/cgroup ]; then
+        printf '/sys/fs/cgroup'
+    fi
+}
+
+runtime_resolv_conf_path() {
+    if [ "$ACHOST_USE_CHROOT" = "1" ]; then
+        printf '%s' "$ACHOST_CHROOT/etc/resolv.conf"
+    else
+        printf '%s' "$ACHOST_NATIVE_ROOT/etc/resolv.conf"
+    fi
+}
+
+resolv_conf_nameservers() {
+    file="$1"
+    [ -r "$file" ] || return 0
+    awk '$1 == "nameserver" { if (out != "") out = out " "; out = out $2 } END { print out }' "$file" 2>/dev/null
+}
+
+bridge_route_value() {
+    ip -4 route show dev "$CONTAINER_BRIDGE" scope link 2>/dev/null | awk '/^[0-9][0-9.]*\/[0-9][0-9]* / { print; exit }'
+}
+
+bridge_subnet_value() {
+    ip -4 route show dev "$CONTAINER_BRIDGE" scope link 2>/dev/null | awk '/^[0-9][0-9.]*\/[0-9][0-9]* / { print $1; exit }'
+}
+
+ip_rule_value() {
+    priority="$1"
+    needle="$2"
+    [ -n "$needle" ] || return 0
+    ip rule show 2>/dev/null | grep -F "$needle" | awk -v priority="$priority:" '$1 == priority { print; exit }'
+}
+
+uplink_value() {
+    if [ -x "${ACHOST_COMMON_BIN:-$ACHOST_BIN}/detect-uplink.sh" ]; then
+        "${ACHOST_COMMON_BIN:-$ACHOST_BIN}/detect-uplink.sh" 1.1.1.1 2>/dev/null || true
+        return 0
+    fi
+    ip route get 1.1.1.1 2>/dev/null | while read -r token rest; do
+        set -- $token $rest
+        while [ "$#" -gt 0 ]; do
+            if [ "$1" = "dev" ] && [ "$#" -ge 2 ]; then
+                printf '%s' "$2"
+                exit 0
+            fi
+            shift
+        done
+    done
+}
+
 status_json() {
     dockerd_pid="$(pid_value "$ACHOST_DOCKERD_PID")"
     containerd_pid="$(pid_value "$ACHOST_CONTAINERD_PID")"
@@ -164,6 +229,23 @@ status_json() {
     autostart="$(autostart_value)"
     base_present=0
     [ "$BASE_ENV_PRESENT" = "1" ] && base_present=1
+    cgroup_mount="$(cgroup_mount_value)"
+    resolv_conf="$(runtime_resolv_conf_path)"
+    resolv_nameservers="$(resolv_conf_nameservers "$resolv_conf")"
+    bridge_route="$(bridge_route_value)"
+    bridge_subnet="$(bridge_subnet_value)"
+    return_policy_rule=""
+    source_policy_rule=""
+    if [ -n "$bridge_subnet" ]; then
+        return_policy_rule="$(ip_rule_value "$RETURN_RULE_PRIORITY" "to $bridge_subnet lookup main")"
+        source_policy_rule="$(ip_rule_value "$SOURCE_RULE_PRIORITY" "from $bridge_subnet lookup")"
+    fi
+    uplink="$(uplink_value)"
+    route_status="missing-bridge"
+    if [ -n "$bridge_route" ]; then
+        route_status="missing-policy"
+        [ -n "$return_policy_rule" ] && route_status="ok"
+    fi
 
     if [ "$running" = "1" ] && [ -x "$DOCKER" ]; then
         info="$($DOCKER info --format '{{.ServerVersion}}|{{.CgroupVersion}}|{{.Driver}}' 2>&1)" || {
@@ -205,6 +287,32 @@ status_json() {
     json_string "$containerd_pid"
     printf ',"cgroup_version":'
     json_string "$cgroup_version"
+    printf ',"configured_cgroup_mode":'
+    json_string "$ACHOST_CGROUP_MODE"
+    printf ',"cgroup_mount":'
+    json_string "$cgroup_mount"
+    printf ',"runtime_mode":'
+    json_string "$ACHOST_RUNTIME_MODE"
+    printf ',"dns_servers":'
+    json_string "$ACHOST_DNS_SERVERS"
+    printf ',"resolv_conf":'
+    json_string "$resolv_conf"
+    printf ',"resolv_nameservers":'
+    json_string "$resolv_nameservers"
+    printf ',"bridge":'
+    json_string "$CONTAINER_BRIDGE"
+    printf ',"bridge_subnet":'
+    json_string "$bridge_subnet"
+    printf ',"bridge_route":'
+    json_string "$bridge_route"
+    printf ',"route_status":'
+    json_string "$route_status"
+    printf ',"return_policy_rule":'
+    json_string "$return_policy_rule"
+    printf ',"source_policy_rule":'
+    json_string "$source_policy_rule"
+    printf ',"uplink":'
+    json_string "$uplink"
     printf ',"storage_driver":'
     json_string "$storage_driver"
     printf ',"server_version":'
@@ -331,10 +439,10 @@ docker_socket_path() {
 normalize_mount_item() {
     docker_socket="$(docker_socket_path)"
     case "$1" in
-        /var/run/docker.sock)
+        /var/run/docker.sock|/run/docker.sock)
             printf '%s' "$docker_socket"
             ;;
-        /var/run/docker.sock:*)
+        /var/run/docker.sock:*|/run/docker.sock:*)
             printf '%s:%s' "$docker_socket" "${1#*:}"
             ;;
         *)

@@ -337,9 +337,17 @@ nav {
   gap: 0.7rem;
 }
 
-.detail-grid.compact {
+.detail-grid.compact,
+.detail-grid.diagnostics-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-top: 1rem;
+}
+
+.detail-grid.diagnostics-grid .detail-item strong {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .detail-item {

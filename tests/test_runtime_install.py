@@ -249,8 +249,10 @@ class RuntimeInstallTest(unittest.TestCase):
                     "portainer",
                     "-v",
                     "/var/run/docker.sock:/var/run/docker.sock",
+                    "--volume=/run/docker.sock:/run/docker.sock",
                     "--mount",
                     "type=bind,source=/var/run/docker.sock,target=/docker.sock",
+                    "--mount=type=bind,src=/run/docker.sock,target=/run/docker.sock",
                     "6053537/portainer-ce",
                 ],
                 check=True,
@@ -261,9 +263,13 @@ class RuntimeInstallTest(unittest.TestCase):
 
             args = result.stdout.splitlines()
             self.assertIn("/data/adb/achost/run/docker.sock:/var/run/docker.sock", args)
+            self.assertIn("--volume=/data/adb/achost/run/docker.sock:/run/docker.sock", args)
             self.assertIn("type=bind,source=/data/adb/achost/run/docker.sock,target=/docker.sock", args)
+            self.assertIn("--mount=type=bind,src=/data/adb/achost/run/docker.sock,target=/run/docker.sock", args)
             self.assertNotIn("/var/run/docker.sock:/var/run/docker.sock", args)
+            self.assertNotIn("--volume=/run/docker.sock:/run/docker.sock", args)
             self.assertNotIn("type=bind,source=/var/run/docker.sock,target=/docker.sock", args)
+            self.assertNotIn("--mount=type=bind,src=/run/docker.sock,target=/run/docker.sock", args)
 
     def test_webui_api_rewrites_default_socket_bind_mount(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -275,6 +281,18 @@ class RuntimeInstallTest(unittest.TestCase):
 
             env = os.environ.copy()
             env["DOCKER_HOST"] = "unix:///data/adb/achost/run/docker.sock"
+            status_result = subprocess.run(
+                ["bash", str(output / "achost" / "bin" / "achost-webui-api.sh"), "status"],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            status_payload = json.loads(status_result.stdout)
+            self.assertIn("route_status", status_payload)
+            self.assertIn("dns_servers", status_payload)
+            self.assertIn("cgroup_mount", status_payload)
+
             result = subprocess.run(
                 [
                     "bash",
@@ -284,7 +302,7 @@ class RuntimeInstallTest(unittest.TestCase):
                     "6053537/portainer-ce",
                     "",
                     "",
-                    "/var/run/docker.sock:/var/run/docker.sock",
+                    "/var/run/docker.sock:/var/run/docker.sock,/run/docker.sock:/run/docker.sock",
                     "bridge",
                 ],
                 check=True,
@@ -296,7 +314,9 @@ class RuntimeInstallTest(unittest.TestCase):
             payload = json.loads(result.stdout)
             self.assertTrue(payload["ok"])
             self.assertIn("/data/adb/achost/run/docker.sock:/var/run/docker.sock", payload["output"])
+            self.assertIn("/data/adb/achost/run/docker.sock:/run/docker.sock", payload["output"])
             self.assertNotIn("\n/var/run/docker.sock:/var/run/docker.sock\n", payload["output"])
+            self.assertNotIn("\n/run/docker.sock:/run/docker.sock\n", payload["output"])
 
     def test_kernelsu_lxc_module_depends_on_base_and_excludes_docker(self):
         with tempfile.TemporaryDirectory() as tmp:
