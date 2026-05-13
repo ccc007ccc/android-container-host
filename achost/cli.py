@@ -20,7 +20,7 @@ from .docker.moby_check_config import print_json as print_moby_json
 from .docker.moby_check_config import run_moby_check
 from .patch_apply import apply_patch_report, format_apply_report, format_patch_list, list_patch_report
 from .report import plan_markdown, to_json, write_plan_reports
-from .runtime_install import format_runtime_install_report, generate_runtime_package
+from .runtime_install import create_runtime_zip, format_runtime_install_report, generate_runtime_package
 from .runtime_test import build_runtime_test_report, format_runtime_test_report
 from .verify_config import evaluate_config, format_human, has_required_failures, summarize_results
 
@@ -127,6 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_install.add_argument("--lxc-asset")
     runtime_install.add_argument("--lxc-sha256")
     runtime_install.add_argument("--start-docker-on-boot", action="store_true")
+    runtime_install.add_argument("--zip", dest="zip_output", nargs="?", const="auto")
     runtime_install.add_argument("--json", action="store_true")
     runtime_install.set_defaults(func=cmd_runtime_install)
 
@@ -269,6 +270,9 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         start_docker_on_boot=args.start_docker_on_boot,
         docker_runtime_mode=args.docker_runtime_mode,
     )
+    if args.zip_output is not None:
+        zip_output = None if args.zip_output == "auto" else args.zip_output
+        report["zip"] = str(create_runtime_zip(args.output, zip_output))
     if args.json:
         print(to_json(report))
     else:

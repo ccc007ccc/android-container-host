@@ -3,3 +3,4 @@ __pycache__/
 out/
 .venv/
 target/
+webui/node_modules/

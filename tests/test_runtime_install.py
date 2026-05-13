@@ -5,6 +5,7 @@ import stat
 import sys
 import tarfile
 import tempfile
+import zipfile
 import unittest
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from achost.runtime_install import (
     COMPOSE_PLUGIN_REL,
     COMPOSE_STANDALONE_REL,
     DOCKER_REQUIRED_BINARIES,
+    create_runtime_zip,
     generate_runtime_package,
 )
 
@@ -106,25 +108,58 @@ class RuntimeInstallTest(unittest.TestCase):
             module_prop = (output / "module.prop").read_text()
             service = output / "service.sh"
             post_fs_data = output / "post-fs-data.sh"
+            customize = output / "customize.sh"
+            uninstall = output / "uninstall.sh"
+            runtime_config = output / "achost" / "etc" / "achost-runtime.conf"
             watchdog = output / "achost" / "bin" / "container-network-watchdog.sh"
             lxc_config = output / "achost" / "etc" / "lxc" / "default.conf"
             docker_config = output / "achost" / "etc" / "docker" / "daemon.json"
             system_docker = output / "system" / "bin" / "docker"
+            webroot_index = output / "webroot" / "index.html"
 
             self.assertEqual(report["install_prefix"], "/data/adb/modules/achost-runtime/achost")
             self.assertIn("id=achost-runtime", module_prop)
             self.assertTrue(service.stat().st_mode & stat.S_IXUSR)
             self.assertTrue(post_fs_data.stat().st_mode & stat.S_IXUSR)
+            self.assertTrue(customize.stat().st_mode & stat.S_IXUSR)
+            self.assertTrue(uninstall.stat().st_mode & stat.S_IXUSR)
             self.assertTrue(watchdog.stat().st_mode & stat.S_IXUSR)
+            self.assertIn("ACHOST_VAR=/data/adb/achost-runtime", runtime_config.read_text())
+            self.assertIn("ACHOST_CHROOT=/data/adb/achost-runtime/chroot", runtime_config.read_text())
             self.assertIn("container-network-watchdog.sh", service.read_text())
+            self.assertIn('"$ACHOST_DATA/containerd/root"', customize.read_text())
+            self.assertIn("achost-docker-stop.sh", uninstall.read_text())
+            self.assertIn("/data/local/tmp/achost-network-watchdog.pid", uninstall.read_text())
             self.assertIn("/data/adb/modules/achost-runtime/achost/etc/lxc/android-common.conf", lxc_config.read_text())
             self.assertIn('"bip": "172.31.0.1/16"', docker_config.read_text())
             self.assertNotIn('"bridge": "docker0"', docker_config.read_text())
             self.assertTrue(system_docker.stat().st_mode & stat.S_IXUSR)
+            self.assertTrue(webroot_index.exists())
+            self.assertIn("ACHost Docker", webroot_index.read_text())
+            manifest = json.loads((output / "manifest.json").read_text())
+            categories = {item["path"]: item["category"] for item in manifest["files"]}
+            self.assertEqual(categories["webroot/index.html"], "webui")
             system_docker_text = system_docker.read_text()
             self.assertIn("/data/adb/modules/achost-runtime/achost", system_docker_text)
             self.assertIn("achost-container-env.sh", system_docker_text)
             self.assertIn('exec "$ACHOST/bin/docker"', system_docker_text)
+
+    def test_kernelsu_module_zip_contains_root_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "module"
+            generate_runtime_package(output, mode="kernelsu-module")
+            zip_path = create_runtime_zip(output)
+
+            with zipfile.ZipFile(zip_path) as archive:
+                names = set(archive.namelist())
+
+            self.assertIn("module.prop", names)
+            self.assertIn("service.sh", names)
+            self.assertIn("customize.sh", names)
+            self.assertIn("uninstall.sh", names)
+            self.assertIn("webroot/index.html", names)
+            self.assertIn("achost/bin/achost-docker-start.sh", names)
+            self.assertIn("system/bin/docker", names)
 
     def test_kernelsu_module_can_start_docker_on_boot(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -133,6 +168,8 @@ class RuntimeInstallTest(unittest.TestCase):
 
             service = (output / "service.sh").read_text()
             self.assertIn("achost-docker-start.sh", service)
+            self.assertIn("protect-container-daemons.sh", service)
+            self.assertIn("container-network-watchdog.sh", service)
 
     def test_native_runtime_mode_writes_config_and_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:

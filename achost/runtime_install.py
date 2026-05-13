@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -14,6 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_ROOT = PROJECT_ROOT / "runtime" / "android"
 SCRIPT_ROOT = PROJECT_ROOT / "scripts"
 MODULE_ID = "achost-runtime"
+KERNELSU_DATA_ROOT = "/data/adb/achost-runtime"
 SUPPORTED_MODES = ("manual", "kernelsu-module")
 SUPPORTED_CGROUP_MODES = ("v1", "v2")
 SUPPORTED_DOCKER_RUNTIME_MODES = ("chroot", "native")
@@ -32,6 +34,7 @@ COMMON_RUNTIME_FILES = (
 DOCKER_RUNTIME_FILES = (
     (RUNTIME_ROOT / "docker" / "bin" / "achost-docker-start.sh", "achost/bin/achost-docker-start.sh"),
     (RUNTIME_ROOT / "docker" / "bin" / "achost-docker-stop.sh", "achost/bin/achost-docker-stop.sh"),
+    (RUNTIME_ROOT / "docker" / "bin" / "achost-webui-api.sh", "achost/bin/achost-webui-api.sh"),
     (RUNTIME_ROOT / "docker" / "net" / "restore-docker-iptables.sh", "achost/bin/restore-docker-iptables.sh"),
     (SCRIPT_ROOT / "docker" / "runtime-smoke-docker.sh", "achost/bin/runtime-smoke-docker.sh"),
     (SCRIPT_ROOT / "docker" / "runtime-docker-feature-test.sh", "achost/bin/runtime-docker-feature-test.sh"),
@@ -54,6 +57,7 @@ BUILDKIT_REQUIRED_BINARIES = ("buildctl", "buildkitd")
 SUPERVISOR_CRATE = PROJECT_ROOT / "crates" / "achost-supervise"
 SUPERVISOR_TARGET = "aarch64-linux-android"
 SUPERVISOR_DEST = "achost/bin/achost-supervise"
+WEBUI_DIST = PROJECT_ROOT / "webui" / "dist"
 LXC_ALLOWED_ROOTS = ("bin", "lib", "lib64", "share")
 
 
@@ -126,7 +130,7 @@ def generate_runtime_package(
             category="docker",
         )
     )
-    files.append(write_runtime_config(root, docker_runtime_mode, cgroup_mode))
+    files.append(write_runtime_config(root, mode, docker_runtime_mode, cgroup_mode))
     files.append(
         copy_text_file(
             RUNTIME_ROOT / "sysctl" / "99-container-host.conf",
@@ -188,6 +192,8 @@ def generate_runtime_package(
         assets["lxc"] = lxc_report
         files.extend(lxc_files)
 
+    if mode == "kernelsu-module":
+        files.extend(install_webui(root))
     entrypoints = write_mode_files(root, mode, files, start_docker_on_boot=start_docker_on_boot)
     files.append(RuntimeFile("manifest.json", None, False))
     report = {
@@ -229,15 +235,23 @@ def ensure_runtime_dirs(root: Path) -> None:
         (root / rel_path).mkdir(parents=True, exist_ok=True)
 
 
-def write_runtime_config(root: Path, docker_runtime_mode: str, cgroup_mode: str) -> RuntimeFile:
+def write_runtime_config(root: Path, mode: str, docker_runtime_mode: str, cgroup_mode: str) -> RuntimeFile:
     use_chroot = "0" if docker_runtime_mode == "native" else "1"
+    lines = [
+        f"ACHOST_RUNTIME_MODE={docker_runtime_mode}",
+        f"ACHOST_USE_CHROOT={use_chroot}",
+        f"ACHOST_CGROUP_MODE={cgroup_mode}",
+    ]
+    if mode == "kernelsu-module":
+        lines.extend(
+            (
+                f"ACHOST_VAR={KERNELSU_DATA_ROOT}",
+                f"ACHOST_CHROOT={KERNELSU_DATA_ROOT}/chroot",
+            )
+        )
     dst = root / "achost" / "etc" / "achost-runtime.conf"
     dst.parent.mkdir(parents=True, exist_ok=True)
-    dst.write_text(
-        f"ACHOST_RUNTIME_MODE={docker_runtime_mode}\n"
-        f"ACHOST_USE_CHROOT={use_chroot}\n"
-        f"ACHOST_CGROUP_MODE={cgroup_mode}\n"
-    )
+    dst.write_text("\n".join(lines) + "\n")
     return RuntimeFile(str(dst.relative_to(root)), None, False)
 
 
@@ -354,6 +368,22 @@ def install_supervisor_helper(root: Path) -> tuple[dict[str, Any], list[RuntimeF
         "linker": linker,
         "path": SUPERVISOR_DEST,
     }, [RuntimeFile(str(dst.relative_to(root)), str(SUPERVISOR_CRATE.relative_to(PROJECT_ROOT)), True, category="supervisor")]
+
+
+def install_webui(root: Path) -> list[RuntimeFile]:
+    index = WEBUI_DIST / "index.html"
+    if not index.exists():
+        raise FileNotFoundError(f"WebUI dist not found: {WEBUI_DIST}; run npm install && npm run build in webui")
+
+    files: list[RuntimeFile] = []
+    for src in sorted(WEBUI_DIST.rglob("*")):
+        if src.is_dir():
+            continue
+        rel = src.relative_to(WEBUI_DIST)
+        dst = root / "webroot" / rel
+        copy_file(src, dst, 0o644)
+        files.append(RuntimeFile(str(dst.relative_to(root)), str(src.relative_to(PROJECT_ROOT)), False, category="webui"))
+    return files
 
 
 def find_android_linker() -> str | None:
@@ -668,6 +698,22 @@ def copy_file(src: Path, dst: Path, mode: int) -> None:
     os.chmod(dst, mode)
 
 
+def create_runtime_zip(root: str | Path, zip_output: str | Path | None = None) -> Path:
+    root_path = Path(root).expanduser().resolve()
+    if not root_path.is_dir():
+        raise FileNotFoundError(f"runtime package directory not found: {root_path}")
+    zip_path = Path(zip_output).expanduser().resolve() if zip_output is not None else root_path.with_name(f"{root_path.name}.zip")
+    if zip_path.exists():
+        raise FileExistsError(f"zip output exists: {zip_path}")
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(root_path.rglob("*")):
+            if path.is_dir():
+                continue
+            archive.write(path, path.relative_to(root_path).as_posix())
+    return zip_path
+
+
 def lxc_destination(name: str) -> str | None:
     parts = normalized_tar_parts(name)
     if not parts:
@@ -708,8 +754,10 @@ def write_mode_files(root: Path, mode: str, files: list[RuntimeFile], start_dock
             "module.prop": module_prop(),
             "post-fs-data.sh": post_fs_data_script(),
             "service.sh": service_script(start_docker_on_boot=start_docker_on_boot),
+            "customize.sh": customize_script(),
+            "uninstall.sh": uninstall_script(),
         }
-        entrypoints = ["post-fs-data.sh", "service.sh"]
+        entrypoints = ["post-fs-data.sh", "service.sh", "customize.sh", "uninstall.sh"]
     else:
         generated = {"install.sh": manual_install_script()}
         entrypoints = ["install.sh"]
@@ -809,27 +857,96 @@ done < "$CONF"
 
 
 def service_script(start_docker_on_boot: bool = False) -> str:
+    docker_start = ""
     if start_docker_on_boot:
         docker_start = """
 if [ -x "$ACHOST/bin/achost-docker-start.sh" ]; then
     "$ACHOST/bin/achost-docker-start.sh" >/dev/null 2>&1 &
 fi
 """
-    else:
-        docker_start = """
+    return f"""#!/system/bin/sh
+MODDIR="${{0%/*}}"
+ACHOST="$MODDIR/achost"
+PATH=/system/bin:/system/xbin:/vendor/bin:/product/bin:/data/adb/magisk:$PATH
+
+if [ -r "$ACHOST/bin/achost-container-env.sh" ]; then
+    . "$ACHOST/bin/achost-container-env.sh"
+fi
+
+ACHOST_VAR="${{ACHOST_VAR:-{KERNELSU_DATA_ROOT}}}"
+ACHOST_RUN="${{ACHOST_RUN:-$ACHOST_VAR/run}}"
+ACHOST_LOG_DIR="${{ACHOST_LOG_DIR:-$ACHOST_VAR/log}}"
+ACHOST_CHROOT="${{ACHOST_CHROOT:-$ACHOST_VAR/chroot}}"
+ACHOST_NATIVE_ROOT="${{ACHOST_NATIVE_ROOT:-$ACHOST_VAR/native-root}}"
+ACHOST_CONTAINERD_STATE="${{ACHOST_CONTAINERD_STATE:-$ACHOST_VAR/containerd/state}}"
+mkdir -p "$ACHOST_VAR" "$ACHOST_VAR/docker" "$ACHOST_RUN" "$ACHOST_LOG_DIR" "$ACHOST_CHROOT" "$ACHOST_NATIVE_ROOT" "$ACHOST_VAR/containerd/root" "$ACHOST_CONTAINERD_STATE" "$ACHOST_VAR/bind-mounts" 2>/dev/null || true
+
 if [ -x "$ACHOST/bin/protect-container-daemons.sh" ]; then
     "$ACHOST/bin/protect-container-daemons.sh" >/dev/null 2>&1 || true
 fi
 
 if [ -x "$ACHOST/bin/container-network-watchdog.sh" ]; then
-    ACHOST_NET_LOG="${ACHOST_NET_LOG:-/data/local/tmp/achost-network-watchdog.log}" "$ACHOST/bin/container-network-watchdog.sh" >/dev/null 2>&1 &
+    "$ACHOST/bin/container-network-watchdog.sh" >/dev/null 2>&1 &
+fi
+{docker_start}"""
+
+
+def customize_script() -> str:
+    return f"""#!/system/bin/sh
+MODDIR="${{MODPATH:-${{0%/*}}}}"
+ACHOST="$MODDIR/achost"
+ACHOST_DATA="{KERNELSU_DATA_ROOT}"
+
+print_msg() {{
+    if command -v ui_print >/dev/null 2>&1; then
+        ui_print "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}}
+
+mkdir -p "$ACHOST_DATA" "$ACHOST_DATA/docker" "$ACHOST_DATA/run" "$ACHOST_DATA/log" "$ACHOST_DATA/chroot" "$ACHOST_DATA/native-root" "$ACHOST_DATA/containerd/root" "$ACHOST_DATA/containerd/state" "$ACHOST_DATA/bind-mounts" 2>/dev/null || true
+chmod 0755 "$MODDIR/post-fs-data.sh" "$MODDIR/service.sh" "$MODDIR/uninstall.sh" 2>/dev/null || true
+chmod 0755 "$ACHOST/bin"/* 2>/dev/null || true
+chmod 0755 "$ACHOST/wrappers"/* 2>/dev/null || true
+chmod 0755 "$ACHOST/etc/docker/cli-plugins"/* 2>/dev/null || true
+chmod 0755 "$MODDIR/system/bin/docker" 2>/dev/null || true
+
+if [ -d "$ACHOST/var/docker" ] && [ -n "$(ls -A "$ACHOST/var/docker" 2>/dev/null)" ]; then
+    print_msg "ACHost: found old module-local Docker data at $ACHOST/var/docker; leaving it untouched."
+    print_msg "ACHost: persistent Docker data now lives at $ACHOST_DATA/docker."
 fi
 """
+
+
+def uninstall_script() -> str:
     return f"""#!/system/bin/sh
 MODDIR="${{0%/*}}"
 ACHOST="$MODDIR/achost"
+ACHOST_DATA="{KERNELSU_DATA_ROOT}"
 PATH=/system/bin:/system/xbin:/vendor/bin:/product/bin:/data/adb/magisk:$PATH
-{docker_start}"""
+
+if [ -r "$ACHOST/bin/achost-container-env.sh" ]; then
+    . "$ACHOST/bin/achost-container-env.sh"
+fi
+
+if [ -x "$ACHOST/bin/achost-docker-stop.sh" ]; then
+    "$ACHOST/bin/achost-docker-stop.sh" >/dev/null 2>&1 || true
+fi
+
+pid_file="${{ACHOST_NET_PID:-/data/local/tmp/achost-network-watchdog.pid}}"
+if [ -r "$pid_file" ]; then
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    case "$pid" in
+        ''|*[!0-9]*) ;;
+        *) kill "$pid" 2>/dev/null || true ;;
+    esac
+fi
+rm -f "$pid_file" /data/local/tmp/achost-network-watchdog.pid /data/local/tmp/achost-network-watchdog.log 2>/dev/null || true
+
+rm -rf "${{ACHOST_RUN:-$ACHOST_DATA/run}}" "${{ACHOST_LOG_DIR:-$ACHOST_DATA/log}}" "${{ACHOST_CHROOT:-$ACHOST_DATA/chroot}}" "${{ACHOST_NATIVE_ROOT:-$ACHOST_DATA/native-root}}" "${{ACHOST_CONTAINERD_STATE:-$ACHOST_DATA/containerd/state}}" 2>/dev/null || true
+mkdir -p "$ACHOST_DATA/docker" "$ACHOST_DATA/containerd/root" 2>/dev/null || true
+"""
 
 
 def file_entry(item: RuntimeFile) -> dict[str, Any]:
@@ -851,8 +968,10 @@ def format_runtime_install_report(report: dict[str, Any]) -> str:
         f"cgroup_mode: {report['cgroup_mode']}",
         f"docker_runtime_mode: {report['docker_runtime_mode']}",
         f"install_prefix: {report['install_prefix']}",
-        "entrypoints:",
     ]
+    if report.get("zip"):
+        lines.append(f"zip: {report['zip']}")
+    lines.append("entrypoints:")
     lines.extend(f"  - {entrypoint}" for entrypoint in report["entrypoints"])
     assets = report.get("assets", {})
     if assets:
