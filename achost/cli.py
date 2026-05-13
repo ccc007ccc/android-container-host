@@ -15,9 +15,9 @@ from .kconfig_inject import (
     inject_kconfig_report,
     rollback_kconfig_report,
 )
-from .moby_check_config import print_human as print_moby_human
-from .moby_check_config import print_json as print_moby_json
-from .moby_check_config import run_moby_check
+from .docker.moby_check_config import print_human as print_moby_human
+from .docker.moby_check_config import print_json as print_moby_json
+from .docker.moby_check_config import run_moby_check
 from .patch_apply import apply_patch_report, format_apply_report, format_patch_list, list_patch_report
 from .report import plan_markdown, to_json, write_plan_reports
 from .runtime_install import format_runtime_install_report, generate_runtime_package

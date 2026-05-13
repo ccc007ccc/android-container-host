@@ -18,24 +18,28 @@ SUPPORTED_MODES = ("manual", "kernelsu-module")
 SUPPORTED_CGROUP_MODES = ("v1", "v2")
 SUPPORTED_DOCKER_RUNTIME_MODES = ("chroot", "native")
 
-BIN_FILES = (
+COMMON_RUNTIME_FILES = (
     (RUNTIME_ROOT / "net" / "detect-uplink.sh", "achost/bin/detect-uplink.sh"),
     (RUNTIME_ROOT / "net" / "container-nat-manager.sh", "achost/bin/container-nat-manager.sh"),
     (RUNTIME_ROOT / "net" / "container-network-watchdog.sh", "achost/bin/container-network-watchdog.sh"),
-    (RUNTIME_ROOT / "net" / "restore-docker-iptables.sh", "achost/bin/restore-docker-iptables.sh"),
     (RUNTIME_ROOT / "memory" / "protect-container-daemons.sh", "achost/bin/protect-container-daemons.sh"),
     (RUNTIME_ROOT / "bin" / "achost-container-env.sh", "achost/bin/achost-container-env.sh"),
     (RUNTIME_ROOT / "bin" / "achost-container-validate.sh", "achost/bin/achost-container-validate.sh"),
-    (RUNTIME_ROOT / "bin" / "achost-docker-start.sh", "achost/bin/achost-docker-start.sh"),
-    (RUNTIME_ROOT / "bin" / "achost-docker-stop.sh", "achost/bin/achost-docker-stop.sh"),
-    (RUNTIME_ROOT / "bin" / "achost-lxc-validate.sh", "achost/bin/achost-lxc-validate.sh"),
     (SCRIPT_ROOT / "runtime-net-debug.sh", "achost/bin/runtime-net-debug.sh"),
-    (SCRIPT_ROOT / "runtime-smoke-docker.sh", "achost/bin/runtime-smoke-docker.sh"),
-    (SCRIPT_ROOT / "runtime-docker-feature-test.sh", "achost/bin/runtime-docker-feature-test.sh"),
-    (SCRIPT_ROOT / "runtime-smoke-lxc.sh", "achost/bin/runtime-smoke-lxc.sh"),
-    (SCRIPT_ROOT / "verify-lxc-checkconfig.sh", "achost/bin/verify-lxc-checkconfig.sh"),
     (SCRIPT_ROOT / "runtime-test.sh", "achost/bin/runtime-test.sh"),
     (SCRIPT_ROOT / "collect-logs.sh", "achost/bin/collect-logs.sh"),
+)
+DOCKER_RUNTIME_FILES = (
+    (RUNTIME_ROOT / "docker" / "bin" / "achost-docker-start.sh", "achost/bin/achost-docker-start.sh"),
+    (RUNTIME_ROOT / "docker" / "bin" / "achost-docker-stop.sh", "achost/bin/achost-docker-stop.sh"),
+    (RUNTIME_ROOT / "docker" / "net" / "restore-docker-iptables.sh", "achost/bin/restore-docker-iptables.sh"),
+    (SCRIPT_ROOT / "docker" / "runtime-smoke-docker.sh", "achost/bin/runtime-smoke-docker.sh"),
+    (SCRIPT_ROOT / "docker" / "runtime-docker-feature-test.sh", "achost/bin/runtime-docker-feature-test.sh"),
+)
+LXC_RUNTIME_FILES = (
+    (RUNTIME_ROOT / "bin" / "achost-lxc-validate.sh", "achost/bin/achost-lxc-validate.sh"),
+    (SCRIPT_ROOT / "runtime-smoke-lxc.sh", "achost/bin/runtime-smoke-lxc.sh"),
+    (SCRIPT_ROOT / "verify-lxc-checkconfig.sh", "achost/bin/verify-lxc-checkconfig.sh"),
 )
 
 LXC_FILES = ("android-common.conf", "default.conf", "unprivileged.conf")
@@ -58,6 +62,7 @@ class RuntimeFile:
     source: str | None
     executable: bool
     asset: str | None = None
+    category: str = "common"
 
 
 def generate_runtime_package(
@@ -104,14 +109,20 @@ def generate_runtime_package(
     replacements = {"@ACHOST_PREFIX@": install_prefix}
     files: list[RuntimeFile] = []
 
-    for src, dst in BIN_FILES:
-        files.append(copy_text_file(src, root / dst, root, executable=True))
+    for category, runtime_files in (
+        ("common", COMMON_RUNTIME_FILES),
+        ("docker", DOCKER_RUNTIME_FILES),
+        ("lxc", LXC_RUNTIME_FILES),
+    ):
+        for src, dst in runtime_files:
+            files.append(copy_text_file(src, root / dst, root, executable=True, category=category))
 
     files.append(
         copy_text_file(
-            RUNTIME_ROOT / "docker" / f"daemon.cgroup-{cgroup_mode}.json",
+            RUNTIME_ROOT / "docker" / "etc" / f"daemon.cgroup-{cgroup_mode}.json",
             root / "achost" / "etc" / "docker" / "daemon.json",
             root,
+            category="docker",
         )
     )
     files.append(write_runtime_config(root, docker_runtime_mode, cgroup_mode))
@@ -120,6 +131,7 @@ def generate_runtime_package(
             RUNTIME_ROOT / "sysctl" / "99-container-host.conf",
             root / "achost" / "etc" / "sysctl.d" / "99-container-host.conf",
             root,
+            category="common",
         )
     )
     for name in LXC_FILES:
@@ -129,6 +141,7 @@ def generate_runtime_package(
                 root / "achost" / "etc" / "lxc" / name,
                 root,
                 replacements=replacements,
+                category="lxc",
             )
         )
 
@@ -227,12 +240,12 @@ def write_runtime_config(root: Path, docker_runtime_mode: str, cgroup_mode: str)
     return RuntimeFile(str(dst.relative_to(root)), None, False)
 
 
-def write_executable_text(root: Path, rel_path: str, text: str) -> RuntimeFile:
+def write_executable_text(root: Path, rel_path: str, text: str, category: str = "common") -> RuntimeFile:
     dst = root / rel_path
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(text)
     os.chmod(dst, 0o755)
-    return RuntimeFile(str(dst.relative_to(root)), None, True)
+    return RuntimeFile(str(dst.relative_to(root)), None, True, category=category)
 
 
 def write_docker_wrappers(root: Path, mode: str, install_prefix: str) -> list[RuntimeFile]:
@@ -241,6 +254,7 @@ def write_docker_wrappers(root: Path, mode: str, install_prefix: str) -> list[Ru
             root,
             "achost/wrappers/docker",
             manual_docker_wrapper(),
+            category="docker",
         )
     ]
     if mode == "kernelsu-module":
@@ -249,6 +263,7 @@ def write_docker_wrappers(root: Path, mode: str, install_prefix: str) -> list[Ru
                 root,
                 "system/bin/docker",
                 module_docker_wrapper(install_prefix),
+                category="docker",
             )
         )
     return files
@@ -279,6 +294,7 @@ def copy_text_file(
     root: Path,
     executable: bool = False,
     replacements: dict[str, str] | None = None,
+    category: str = "common",
 ) -> RuntimeFile:
     if not src.exists():
         raise FileNotFoundError(f"runtime source not found: {src}")
@@ -291,7 +307,7 @@ def copy_text_file(
     dst.write_text(text)
     if executable:
         os.chmod(dst, 0o755)
-    return RuntimeFile(str(dst.relative_to(root)), str(src.relative_to(PROJECT_ROOT)), executable)
+    return RuntimeFile(str(dst.relative_to(root)), str(src.relative_to(PROJECT_ROOT)), executable, category=category)
 
 
 def install_supervisor_helper(root: Path) -> tuple[dict[str, Any] | None, list[RuntimeFile]]:
@@ -330,7 +346,7 @@ def install_supervisor_helper(root: Path) -> tuple[dict[str, Any] | None, list[R
         "source": str(SUPERVISOR_SOURCE.relative_to(PROJECT_ROOT)),
         "compiler": compiler,
         "path": SUPERVISOR_DEST,
-    }, [RuntimeFile(str(dst.relative_to(root)), str(SUPERVISOR_SOURCE.relative_to(PROJECT_ROOT)), True)]
+    }, [RuntimeFile(str(dst.relative_to(root)), str(SUPERVISOR_SOURCE.relative_to(PROJECT_ROOT)), True, category="supervisor")]
 
 
 def find_aarch64_compiler() -> str | None:
@@ -407,7 +423,7 @@ def install_docker_asset(
             dst = root / "achost" / "bin" / name
             copy_tar_member(archive, member, dst, 0o755)
             extracted[name] = member.name
-            files.append(RuntimeFile(str(dst.relative_to(root)), str(asset_path), True, "docker"))
+            files.append(RuntimeFile(str(dst.relative_to(root)), str(asset_path), True, "docker", "docker-asset"))
 
         if compose_member is not None:
             compose_report, compose_files = install_compose_tar_member(
@@ -454,7 +470,7 @@ def install_compose_tar_member(
     for rel_path in (COMPOSE_PLUGIN_REL, COMPOSE_STANDALONE_REL):
         dst = root / rel_path
         copy_tar_member(archive, member, dst, 0o755)
-        files.append(RuntimeFile(str(dst.relative_to(root)), str(asset_path), True, "compose"))
+        files.append(RuntimeFile(str(dst.relative_to(root)), str(asset_path), True, "compose", "docker-asset"))
     return {
         "source": str(asset_path),
         "sha256": digest,
@@ -525,13 +541,13 @@ def install_cli_plugin_asset(
             for rel_path in (plugin_rel, standalone_rel):
                 dst = root / rel_path
                 copy_tar_member(archive, chosen, dst, 0o755)
-                files.append(RuntimeFile(str(dst.relative_to(root)), str(asset_path), True, asset_label))
+                files.append(RuntimeFile(str(dst.relative_to(root)), str(asset_path), True, asset_label, "docker-asset"))
             member_name = chosen.name
     else:
         for rel_path in (plugin_rel, standalone_rel):
             dst = root / rel_path
             copy_file(asset_path, dst, 0o755)
-            files.append(RuntimeFile(str(dst.relative_to(root)), str(asset_path), True, asset_label))
+            files.append(RuntimeFile(str(dst.relative_to(root)), str(asset_path), True, asset_label, "docker-asset"))
 
     return {
         "source": str(asset_path),
@@ -561,7 +577,7 @@ def install_buildkit_asset(asset: str | Path, root: Path, expected_sha256: str |
             dst = root / "achost" / "bin" / name
             copy_tar_member(archive, member, dst, 0o755)
             extracted[name] = member.name
-            files.append(RuntimeFile(str(dst.relative_to(root)), str(asset_path), True, "buildkit"))
+            files.append(RuntimeFile(str(dst.relative_to(root)), str(asset_path), True, "buildkit", "docker-asset"))
 
     missing = [name for name in BUILDKIT_REQUIRED_BINARIES if name not in extracted]
     if missing:
@@ -594,7 +610,7 @@ def install_lxc_asset(asset: str | Path, root: Path, expected_sha256: str | None
             mode = 0o755 if executable else (member.mode & 0o777 or 0o644)
             copy_tar_member(archive, member, dst, mode)
             extracted.append(rel_path)
-            files.append(RuntimeFile(str(dst.relative_to(root)), str(asset_path), executable, "lxc"))
+            files.append(RuntimeFile(str(dst.relative_to(root)), str(asset_path), executable, "lxc", "lxc-asset"))
 
     if not extracted:
         raise ValueError("lxc asset contained no supported files")
@@ -815,6 +831,7 @@ def file_entry(item: RuntimeFile) -> dict[str, Any]:
         "path": item.path,
         "source": item.source,
         "executable": item.executable,
+        "category": item.category,
     }
     if item.asset is not None:
         entry["asset"] = item.asset

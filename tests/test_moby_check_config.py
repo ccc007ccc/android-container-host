@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from achost.moby_check_config import parse_moby_output, run_moby_check
+from achost.docker.moby_check_config import parse_moby_output, run_moby_check
 
 
 class MobyCheckConfigTest(unittest.TestCase):

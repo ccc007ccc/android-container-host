@@ -17,7 +17,7 @@ Implemented first:
 - `scripts/inject-kconfig.sh`
 - `scripts/prepare-tree.sh`
 - `scripts/rollback.sh`
-- `scripts/verify-moby-check-config.sh`
+- `scripts/docker/verify-moby-check-config.sh`
 - `achost list-patches`
 - `achost apply-patches` dry-run framework
 - Android runtime NAT/debug scripts
@@ -75,7 +75,7 @@ scripts/rollback.sh \
   --kernel-tree /home/ccc007/Android/Kernel/android_kernel_xiaomi_sm8250
 
 third_party/moby-check-config/fetch.sh
-scripts/verify-moby-check-config.sh \
+scripts/docker/verify-moby-check-config.sh \
   /home/ccc007/Android/Kernel/android_kernel_xiaomi_sm8250/out/.config
 
 bin/achost list-patches \
@@ -88,7 +88,7 @@ bin/achost apply-patches \
 runtime/android/net/container-nat-manager.sh
 runtime/android/net/container-network-watchdog.sh
 scripts/runtime-net-debug.sh
-scripts/runtime-smoke-docker.sh
+scripts/docker/runtime-smoke-docker.sh
 scripts/verify-lxc-checkconfig.sh
 scripts/runtime-smoke-lxc.sh
 runtime/android/memory/protect-container-daemons.sh

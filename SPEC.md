@@ -1501,7 +1501,7 @@ scripts/verify-config.sh out/.config --json > report.json
 命令：
 
 ```bash
-scripts/verify-moby-check-config.sh out/.config
+scripts/docker/verify-moby-check-config.sh out/.config
 ```
 
 要求：
@@ -1548,7 +1548,7 @@ apparmor/selinux state
 提供：
 
 ```bash
-scripts/runtime-smoke-docker.sh
+scripts/docker/runtime-smoke-docker.sh
 ```
 
 默认安全 smoke 不依赖 Docker Hub：
@@ -1566,13 +1566,13 @@ docker rmi achost-local-smoke:<stamp>
 如果需要让本地镜像创建 bridge/veth，但仍不测试外网访问：
 
 ```bash
-DOCKER_SMOKE_MODE=local-bridge scripts/runtime-smoke-docker.sh
+DOCKER_SMOKE_MODE=local-bridge scripts/docker/runtime-smoke-docker.sh
 ```
 
 只有在 Docker Hub/registry 可访问时才运行完整拉取/网络 smoke：
 
 ```bash
-DOCKER_SMOKE_MODE=full scripts/runtime-smoke-docker.sh
+DOCKER_SMOKE_MODE=full scripts/docker/runtime-smoke-docker.sh
 ```
 
 完整 smoke 覆盖：
@@ -2066,7 +2066,7 @@ scripts/verify-config.sh
 
 ```text
 third_party/moby-check-config/fetch.sh
-scripts/verify-moby-check-config.sh
+scripts/docker/verify-moby-check-config.sh
 ```
 
 ---
@@ -2113,7 +2113,7 @@ scripts/runtime-net-debug.sh
 交付：
 
 ```text
-scripts/runtime-smoke-docker.sh
+scripts/docker/runtime-smoke-docker.sh
 ```
 
 ---

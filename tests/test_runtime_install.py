@@ -40,6 +40,7 @@ class RuntimeInstallTest(unittest.TestCase):
             install_script = output / "install.sh"
             runtime_test = output / "achost" / "bin" / "runtime-test.sh"
             manifest = json.loads((output / "manifest.json").read_text())
+            categories = {item["path"]: item["category"] for item in manifest["files"]}
 
             self.assertEqual(report["mode"], "manual")
             self.assertEqual(report["docker_runtime_mode"], "chroot")
@@ -55,6 +56,12 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertTrue(validate.stat().st_mode & stat.S_IXUSR)
             self.assertTrue(docker_start.exists())
             self.assertTrue(docker_start.stat().st_mode & stat.S_IXUSR)
+            self.assertEqual(categories["achost/bin/achost-docker-start.sh"], "docker")
+            self.assertEqual(categories["achost/bin/runtime-docker-feature-test.sh"], "docker")
+            self.assertEqual(categories["achost/bin/achost-lxc-validate.sh"], "lxc")
+            self.assertEqual(categories["achost/bin/container-network-watchdog.sh"], "common")
+            self.assertEqual(categories["achost/etc/docker/daemon.json"], "docker")
+            self.assertEqual(categories["achost/etc/lxc/default.conf"], "lxc")
             docker_start_text = docker_start.read_text()
             self.assertIn("wait_for_bridge", docker_start_text)
             self.assertIn("network reconciled bridge=", docker_start_text)
