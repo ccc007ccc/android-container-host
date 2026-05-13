@@ -35,6 +35,8 @@ class RuntimeInstallTest(unittest.TestCase):
             watchdog = output / "achost" / "bin" / "container-network-watchdog.sh"
             validate = output / "achost" / "bin" / "achost-container-validate.sh"
             docker_start = output / "achost" / "bin" / "achost-docker-start.sh"
+            webui_api = output / "achost" / "bin" / "achost-webui-api"
+            webui_api_wrapper = output / "achost" / "bin" / "achost-webui-api.sh"
             docker_config = output / "achost" / "etc" / "docker" / "daemon.json"
             runtime_config = output / "achost" / "etc" / "achost-runtime.conf"
             docker_smoke = output / "achost" / "bin" / "runtime-smoke-docker.sh"
@@ -62,7 +64,13 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertTrue(validate.stat().st_mode & stat.S_IXUSR)
             self.assertTrue(docker_start.exists())
             self.assertTrue(docker_start.stat().st_mode & stat.S_IXUSR)
+            self.assertTrue(webui_api.exists())
+            self.assertTrue(webui_api.stat().st_mode & stat.S_IXUSR)
+            webui_api_wrapper_text = webui_api_wrapper.read_text()
+            self.assertIn('exec "$SCRIPT_DIR/achost-webui-api" "$@"', webui_api_wrapper_text)
+            self.assertNotIn("status_json()", webui_api_wrapper_text)
             self.assertEqual(categories["achost/bin/achost-docker-start.sh"], "docker")
+            self.assertEqual(categories["achost/bin/achost-webui-api"], "docker")
             self.assertEqual(categories["achost/bin/runtime-docker-feature-test.sh"], "docker")
             self.assertEqual(categories["achost/bin/achost-lxc-validate.sh"], "lxc")
             self.assertEqual(categories["achost/bin/container-network-watchdog.sh"], "common")
@@ -168,6 +176,7 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("uninstall.sh", names)
             self.assertIn("webroot/index.html", names)
             self.assertIn("achost/bin/achost-docker-start.sh", names)
+            self.assertIn("achost/bin/achost-webui-api", names)
             self.assertFalse(any(name.startswith("system/") and name.endswith("/docker") for name in names))
 
     def test_kernelsu_base_module_excludes_feature_payloads(self):
@@ -184,6 +193,7 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("achost/bin/achost-container-env.sh", paths)
             self.assertIn("achost/bin/achost-supervise", paths)
             self.assertNotIn("achost/bin/achost-docker-start.sh", paths)
+            self.assertNotIn("achost/bin/achost-webui-api", paths)
             self.assertNotIn("achost/bin/achost-lxc-validate.sh", paths)
             self.assertFalse((output / "system" / "bin" / "docker").exists())
             self.assertFalse((output / "system" / "xbin" / "docker").exists())
@@ -206,6 +216,7 @@ class RuntimeInstallTest(unittest.TestCase):
             service_text = (output / "service.sh").read_text()
             customize_text = (output / "customize.sh").read_text()
             uninstall_text = (output / "uninstall.sh").read_text()
+            webui_api_wrapper_text = (output / "achost" / "bin" / "achost-webui-api.sh").read_text()
 
             self.assertEqual(report["module_id"], "achost-docker")
             self.assertEqual(manifest["module_target"], "docker")
@@ -213,6 +224,10 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertEqual(manifest["provides"], ["docker"])
             self.assertIn("achost/bin/achost-docker-start.sh", paths)
             self.assertIn("achost/bin/achost-webui-api.sh", paths)
+            self.assertIn("achost/bin/achost-webui-api", paths)
+            self.assertEqual(report["assets"]["webui_api"]["path"], "achost/bin/achost-webui-api")
+            self.assertIn('exec "$SCRIPT_DIR/achost-webui-api" "$@"', webui_api_wrapper_text)
+            self.assertNotIn("case \"${1:-}\"", webui_api_wrapper_text)
             self.assertFalse(any(path.startswith("system/") and path.endswith("/docker") for path in paths))
             self.assertIn("webroot/index.html", paths)
             self.assertNotIn("achost/bin/achost-container-env.sh", paths)
@@ -271,52 +286,21 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertNotIn("type=bind,source=/var/run/docker.sock,target=/docker.sock", args)
             self.assertNotIn("--mount=type=bind,src=/run/docker.sock,target=/run/docker.sock", args)
 
-    def test_webui_api_rewrites_default_socket_bind_mount(self):
+    def test_webui_api_wrapper_execs_rust_binary(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "docker"
             generate_runtime_package(output, mode="kernelsu-module", module_target="docker")
-            fake_docker = output / "achost" / "bin" / "docker"
-            fake_docker.write_text("#!/usr/bin/env sh\nprintf '%s\\n' \"$@\"\n")
-            fake_docker.chmod(0o755)
+            wrapper = output / "achost" / "bin" / "achost-webui-api.sh"
+            binary = output / "achost" / "bin" / "achost-webui-api"
 
-            env = os.environ.copy()
-            env["DOCKER_HOST"] = "unix:///data/adb/achost/run/docker.sock"
-            status_result = subprocess.run(
-                ["bash", str(output / "achost" / "bin" / "achost-webui-api.sh"), "status"],
-                check=True,
-                env=env,
-                stdout=subprocess.PIPE,
-                text=True,
-            )
-            status_payload = json.loads(status_result.stdout)
-            self.assertIn("route_status", status_payload)
-            self.assertIn("dns_servers", status_payload)
-            self.assertIn("cgroup_mount", status_payload)
-
-            result = subprocess.run(
-                [
-                    "bash",
-                    str(output / "achost" / "bin" / "achost-webui-api.sh"),
-                    "add-container",
-                    "portainer",
-                    "6053537/portainer-ce",
-                    "",
-                    "",
-                    "/var/run/docker.sock:/var/run/docker.sock,/run/docker.sock:/run/docker.sock",
-                    "bridge",
-                ],
-                check=True,
-                env=env,
-                stdout=subprocess.PIPE,
-                text=True,
-            )
-
-            payload = json.loads(result.stdout)
-            self.assertTrue(payload["ok"])
-            self.assertIn("/data/adb/achost/run/docker.sock:/var/run/docker.sock", payload["output"])
-            self.assertIn("/data/adb/achost/run/docker.sock:/run/docker.sock", payload["output"])
-            self.assertNotIn("\n/var/run/docker.sock:/var/run/docker.sock\n", payload["output"])
-            self.assertNotIn("\n/run/docker.sock:/run/docker.sock\n", payload["output"])
+            wrapper_text = wrapper.read_text()
+            self.assertTrue(binary.exists())
+            self.assertTrue(binary.stat().st_mode & stat.S_IXUSR)
+            self.assertIn("achost-container-env.sh", wrapper_text)
+            self.assertIn("ACHOST_BASE_ENV_PRESENT=1", wrapper_text)
+            self.assertIn('exec "$SCRIPT_DIR/achost-webui-api" "$@"', wrapper_text)
+            self.assertNotIn("json_escape", wrapper_text)
+            self.assertNotIn("normalize_mount_item", wrapper_text)
 
     def test_kernelsu_lxc_module_depends_on_base_and_excludes_docker(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -333,6 +317,7 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("achost/etc/lxc/default.conf", paths)
             self.assertNotIn("achost/bin/achost-docker-start.sh", paths)
             self.assertNotIn("achost/bin/achost-webui-api.sh", paths)
+            self.assertNotIn("achost/bin/achost-webui-api", paths)
             self.assertNotIn("achost/bin/achost-supervise", paths)
             self.assertFalse((output / "system" / "bin" / "docker").exists())
             self.assertFalse((output / "system" / "xbin" / "docker").exists())

@@ -56,9 +56,13 @@ COMPOSE_STANDALONE_REL = "achost/bin/docker-compose"
 BUILDX_PLUGIN_REL = "achost/etc/docker/cli-plugins/docker-buildx"
 BUILDX_STANDALONE_REL = "achost/bin/docker-buildx"
 BUILDKIT_REQUIRED_BINARIES = ("buildctl", "buildkitd")
+RUST_ANDROID_TARGET = "aarch64-linux-android"
 SUPERVISOR_CRATE = PROJECT_ROOT / "crates" / "achost-supervise"
-SUPERVISOR_TARGET = "aarch64-linux-android"
+SUPERVISOR_TARGET = RUST_ANDROID_TARGET
 SUPERVISOR_DEST = "achost/bin/achost-supervise"
+WEBUI_API_CRATE = PROJECT_ROOT / "crates" / "achost-webui-api"
+WEBUI_API_TARGET = RUST_ANDROID_TARGET
+WEBUI_API_DEST = "achost/bin/achost-webui-api"
 WEBUI_DIST = PROJECT_ROOT / "webui" / "dist"
 LXC_ALLOWED_ROOTS = ("bin", "lib", "lib64", "share")
 
@@ -70,6 +74,15 @@ class RuntimeFile:
     executable: bool
     asset: str | None = None
     category: str = "common"
+
+
+@dataclass(frozen=True)
+class RustRuntimeBinary:
+    package: str
+    crate: Path
+    target: str
+    dest: str
+    category: str
 
 
 @dataclass(frozen=True)
@@ -245,6 +258,10 @@ def generate_runtime_package(
     if mode == "manual" or spec.include_supervisor:
         supervisor_report, supervisor_files = install_supervisor_helper(root)
         files.extend(supervisor_files)
+    webui_api_report: dict[str, Any] | None = None
+    if mode == "manual" or spec.include_docker:
+        webui_api_report, webui_api_files = install_webui_api_helper(root)
+        files.extend(webui_api_files)
     assets: dict[str, Any] = {
         "docker": None,
         "compose": None,
@@ -252,6 +269,7 @@ def generate_runtime_package(
         "buildkit": None,
         "lxc": None,
         "supervisor": supervisor_report,
+        "webui_api": webui_api_report,
         "start_docker_on_boot": start_docker_on_boot,
     }
     if docker_asset is not None:
@@ -564,26 +582,40 @@ def copy_text_file(
 
 
 def install_supervisor_helper(root: Path) -> tuple[dict[str, Any], list[RuntimeFile]]:
-    if not SUPERVISOR_CRATE.exists():
-        raise FileNotFoundError(f"supervisor crate not found: {SUPERVISOR_CRATE}")
+    return install_rust_runtime_binary(
+        root,
+        RustRuntimeBinary("achost-supervise", SUPERVISOR_CRATE, SUPERVISOR_TARGET, SUPERVISOR_DEST, "supervisor"),
+    )
+
+
+def install_webui_api_helper(root: Path) -> tuple[dict[str, Any], list[RuntimeFile]]:
+    return install_rust_runtime_binary(
+        root,
+        RustRuntimeBinary("achost-webui-api", WEBUI_API_CRATE, WEBUI_API_TARGET, WEBUI_API_DEST, "docker"),
+    )
+
+
+def install_rust_runtime_binary(root: Path, binary: RustRuntimeBinary) -> tuple[dict[str, Any], list[RuntimeFile]]:
+    if not binary.crate.exists():
+        raise FileNotFoundError(f"Rust crate not found for {binary.package}: {binary.crate}")
 
     cargo = shutil.which("cargo")
     if cargo is None:
-        raise FileNotFoundError("cargo not found for Rust achost-supervise build")
+        raise FileNotFoundError(f"cargo not found for Rust {binary.package} build")
     linker = find_android_linker()
     if linker is None:
-        raise FileNotFoundError("no Android NDK clang linker found for Rust achost-supervise")
+        raise FileNotFoundError(f"no Android NDK clang linker found for Rust {binary.package}")
 
     command = [
         cargo,
         "build",
         "--release",
         "--target",
-        SUPERVISOR_TARGET,
+        binary.target,
         "--manifest-path",
         str(PROJECT_ROOT / "Cargo.toml"),
         "-p",
-        "achost-supervise",
+        binary.package,
     ]
     env = os.environ.copy()
     env["CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"] = linker
@@ -591,21 +623,21 @@ def install_supervisor_helper(root: Path) -> tuple[dict[str, Any], list[RuntimeF
         subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
     except subprocess.CalledProcessError as exc:
         message = exc.stderr.strip() or exc.stdout.strip() or str(exc)
-        raise RuntimeError(f"failed to build Rust achost-supervise: {message}") from exc
+        raise RuntimeError(f"failed to build Rust {binary.package}: {message}") from exc
 
-    built = PROJECT_ROOT / "target" / SUPERVISOR_TARGET / "release" / "achost-supervise"
+    built = PROJECT_ROOT / "target" / binary.target / "release" / binary.package
     if not built.exists():
-        raise FileNotFoundError(f"Rust achost-supervise build output missing: {built}")
-    dst = root / SUPERVISOR_DEST
+        raise FileNotFoundError(f"Rust {binary.package} build output missing: {built}")
+    dst = root / binary.dest
     copy_file(built, dst, 0o755)
     return {
-        "source": str(SUPERVISOR_CRATE.relative_to(PROJECT_ROOT)),
+        "source": str(binary.crate.relative_to(PROJECT_ROOT)),
         "implementation": "rust",
         "builder": cargo,
-        "target": SUPERVISOR_TARGET,
+        "target": binary.target,
         "linker": linker,
-        "path": SUPERVISOR_DEST,
-    }, [RuntimeFile(str(dst.relative_to(root)), str(SUPERVISOR_CRATE.relative_to(PROJECT_ROOT)), True, category="supervisor")]
+        "path": binary.dest,
+    }, [RuntimeFile(str(dst.relative_to(root)), str(binary.crate.relative_to(PROJECT_ROOT)), True, category=binary.category)]
 
 
 def install_webui(root: Path, spec: ModuleSpec) -> list[RuntimeFile]:
@@ -1268,14 +1300,15 @@ def format_runtime_install_report(report: dict[str, Any]) -> str:
                 lines.append(f"  - {name}: {asset['source']} sha256={asset['sha256']}")
             else:
                 lines.append(f"  - {name}: not included")
-        supervisor = assets.get("supervisor")
-        if supervisor:
-            lines.append(
-                f"  - supervisor: {supervisor['path']} implementation={supervisor['implementation']} "
-                f"target={supervisor['target']} linker={supervisor['linker']}"
-            )
-        else:
-            lines.append("  - supervisor: not included")
+        for name in ("supervisor", "webui_api"):
+            rust_binary = assets.get(name)
+            if rust_binary:
+                lines.append(
+                    f"  - {name}: {rust_binary['path']} implementation={rust_binary['implementation']} "
+                    f"target={rust_binary['target']} linker={rust_binary['linker']}"
+                )
+            else:
+                lines.append(f"  - {name}: not included")
         if assets.get("start_docker_on_boot"):
             lines.append("  - start_docker_on_boot: enabled")
     lines.append("files:")
