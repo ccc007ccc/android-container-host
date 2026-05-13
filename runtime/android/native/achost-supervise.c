@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -37,6 +38,10 @@
 #endif
 #endif
 
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
 #define MAX_ARGS 128
 #define MAX_STRING 65535U
 
@@ -53,7 +58,7 @@ static void handle_signal(int sig) {
 static void usage(const char *argv0) {
     fprintf(stderr,
             "usage:\n"
-            "  %s --server --socket PATH --pid-file PATH [--pivot-root PATH]\n"
+            "  %s --server --socket PATH --pid-file PATH [--pivot-root PATH|--native-root PATH]\n"
             "  %s --client --socket PATH --pid-file PATH [--name NAME] -- COMMAND [ARG...]\n"
             "  %s --launch [--log-file PATH] [--chroot PATH|--pivot-root PATH] -- COMMAND [ARG...]\n"
             "  %s --pid-file PATH [--name NAME] -- COMMAND [ARG...]\n",
@@ -341,10 +346,32 @@ static void handle_client(int fd) {
     free(pid_file);
 }
 
-static int pivot_to_root(const char *new_root) {
-#if !defined(SYS_unshare) || !defined(SYS_pivot_root)
-    (void)new_root;
-    fprintf(stderr, "pivot-root unavailable on this platform\n");
+static int path_join(char *buffer, size_t size, const char *root, const char *path) {
+    int len = snprintf(buffer, size, "%s/%s", root, path[0] == '/' ? path + 1 : path);
+    if (len < 0 || (size_t)len >= size) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
+static int ensure_directory(const char *path, mode_t mode) {
+    struct stat st;
+    if (mkdir(path, mode) < 0) {
+        if (errno == EEXIST && stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+            chmod(path, mode);
+            return 0;
+        }
+        fprintf(stderr, "mkdir %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+    chmod(path, mode);
+    return 0;
+}
+
+static int make_private_mount_namespace(void) {
+#if !defined(SYS_unshare)
+    fprintf(stderr, "mount namespace unavailable on this platform\n");
     return 1;
 #else
     if (syscall(SYS_unshare, CLONE_NEWNS) < 0) {
@@ -355,6 +382,16 @@ static int pivot_to_root(const char *new_root) {
         perror("mount(MS_PRIVATE)");
         return 1;
     }
+    return 0;
+#endif
+}
+
+static int pivot_into_root(const char *new_root) {
+#if !defined(SYS_pivot_root)
+    (void)new_root;
+    fprintf(stderr, "pivot-root unavailable on this platform\n");
+    return 1;
+#else
     if (chdir(new_root) < 0) {
         perror("chdir pivot root");
         return 1;
@@ -379,6 +416,182 @@ static int pivot_to_root(const char *new_root) {
     }
     rmdir("/.achost-old-root");
     return 0;
+#endif
+}
+
+static int pivot_to_root(const char *new_root) {
+    if (make_private_mount_namespace() != 0) {
+        return 1;
+    }
+    return pivot_into_root(new_root);
+}
+
+static int bind_native_path(const char *native_root, const char *source, bool required) {
+    struct stat st;
+    char destination[PATH_MAX];
+    if (stat(source, &st) < 0) {
+        if (required) {
+            fprintf(stderr, "required native path missing: %s\n", source);
+            return 1;
+        }
+        return 0;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        return 0;
+    }
+    if (path_join(destination, sizeof(destination), native_root, source) < 0) {
+        perror("native path join");
+        return required ? 1 : 0;
+    }
+    if (ensure_directory(destination, 0755) < 0) {
+        return required ? 1 : 0;
+    }
+    if (mount(source, destination, NULL, MS_BIND | MS_REC, NULL) < 0) {
+        fprintf(stderr, "bind %s to %s: %s\n", source, destination, strerror(errno));
+        return required ? 1 : 0;
+    }
+    return 0;
+}
+
+static int mount_native_cgroup_controller(const char *cgroup_root, const char *controller) {
+    char destination[PATH_MAX];
+
+    if (path_join(destination, sizeof(destination), cgroup_root, controller) < 0) {
+        perror("native cgroup path join");
+        return 1;
+    }
+    if (ensure_directory(destination, 0755) < 0) {
+        return 1;
+    }
+    if (mount("none", destination, "cgroup", 0, controller) < 0) {
+        fprintf(stderr, "warning: unable to mount %s cgroup: %s\n", controller, strerror(errno));
+        return 0;
+    }
+    return 0;
+}
+
+static int setup_native_cgroups(const char *native_root) {
+    static const char *controllers[] = {"devices", "pids", "cpu", "cpuacct", "cpuset", "blkio", "freezer", "memory"};
+    char cgroup_root[PATH_MAX];
+
+    if (path_join(cgroup_root, sizeof(cgroup_root), native_root, "/sys/fs/cgroup") < 0) {
+        perror("native cgroup root path join");
+        return 1;
+    }
+    if (ensure_directory(cgroup_root, 0755) < 0) {
+        return 1;
+    }
+    if (mount("tmpfs", cgroup_root, "tmpfs", 0, "mode=755,size=1m") < 0) {
+        fprintf(stderr, "mount native /sys/fs/cgroup tmpfs: %s\n", strerror(errno));
+        return 1;
+    }
+    for (size_t i = 0; i < sizeof(controllers) / sizeof(controllers[0]); i++) {
+        if (mount_native_cgroup_controller(cgroup_root, controllers[i]) != 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int setup_native_run(const char *native_root) {
+    char run_path[PATH_MAX];
+    char var_path[PATH_MAX];
+    char var_run_path[PATH_MAX];
+    char tmp_path[PATH_MAX];
+    struct stat st;
+
+    if (path_join(run_path, sizeof(run_path), native_root, "/run") < 0 ||
+        path_join(var_path, sizeof(var_path), native_root, "/var") < 0 ||
+        path_join(var_run_path, sizeof(var_run_path), native_root, "/var/run") < 0 ||
+        path_join(tmp_path, sizeof(tmp_path), native_root, "/tmp") < 0) {
+        perror("native run path join");
+        return 1;
+    }
+    if (ensure_directory(run_path, 0755) < 0 || ensure_directory(var_path, 0755) < 0 || ensure_directory(tmp_path, 01777) < 0) {
+        return 1;
+    }
+    if (mount("tmpfs", run_path, "tmpfs", 0, "mode=755,size=64m") < 0) {
+        fprintf(stderr, "mount private /run: %s\n", strerror(errno));
+        return 1;
+    }
+    if (lstat(var_run_path, &st) == 0) {
+        if (S_ISLNK(st.st_mode)) {
+            unlink(var_run_path);
+        } else if (S_ISDIR(st.st_mode)) {
+            if (mount(run_path, var_run_path, NULL, MS_BIND | MS_REC, NULL) < 0) {
+                fprintf(stderr, "bind private /run to /var/run: %s\n", strerror(errno));
+                return 1;
+            }
+            goto tmp_mount;
+        } else {
+            unlink(var_run_path);
+        }
+    }
+    if (symlink("/run", var_run_path) < 0 && errno != EEXIST) {
+        fprintf(stderr, "symlink /var/run: %s\n", strerror(errno));
+        return 1;
+    }
+
+tmp_mount:
+    if (mount("tmpfs", tmp_path, "tmpfs", 0, "mode=1777,size=64m") < 0) {
+        fprintf(stderr, "warning: unable to mount private /tmp: %s\n", strerror(errno));
+    }
+    return 0;
+}
+
+static int setup_native_root(const char *native_root) {
+#if !defined(SYS_unshare) || !defined(SYS_pivot_root)
+    (void)native_root;
+    fprintf(stderr, "native root unavailable on this platform\n");
+    return 1;
+#else
+    static const struct {
+        const char *path;
+        bool required;
+    } mounts[] = {
+        {"/data", true},
+        {"/dev", true},
+        {"/proc", true},
+        {"/sys", true},
+        {"/system", true},
+        {"/apex", true},
+        {"/vendor", false},
+        {"/product", false},
+        {"/odm", false},
+        {"/mnt", false},
+        {"/storage", false},
+        {"/metadata", false},
+        {"/linkerconfig", false},
+        {"/acct", false},
+        {"/config", false},
+        {"/debug_ramdisk", false},
+        {"/second_stage_resources", false},
+        {"/sdcard", false},
+    };
+
+    if (ensure_directory(native_root, 0755) < 0) {
+        return 1;
+    }
+    if (make_private_mount_namespace() != 0) {
+        return 1;
+    }
+    if (mount(native_root, native_root, NULL, MS_BIND, NULL) < 0) {
+        fprintf(stderr, "bind native root %s: %s\n", native_root, strerror(errno));
+        return 1;
+    }
+    for (size_t i = 0; i < sizeof(mounts) / sizeof(mounts[0]); i++) {
+        if (bind_native_path(native_root, mounts[i].path, mounts[i].required) != 0) {
+            return 1;
+        }
+    }
+    if (setup_native_cgroups(native_root) != 0) {
+        return 1;
+    }
+    if (setup_native_run(native_root) != 0) {
+        return 1;
+    }
+    fprintf(stderr, "achost-supervise: native root=%s private-run=ready private-cgroup=ready\n", native_root);
+    return pivot_into_root(native_root);
 #endif
 }
 
@@ -453,7 +666,7 @@ static int create_server_socket(const char *socket_path) {
     return fd;
 }
 
-static int run_server(const char *socket_path, const char *pid_file, const char *pivot_root_path) {
+static int run_server(const char *socket_path, const char *pid_file, const char *pivot_root_path, const char *native_root_path) {
     if (install_handlers()) {
         perror("sigaction");
         return 1;
@@ -464,6 +677,9 @@ static int run_server(const char *socket_path, const char *pid_file, const char 
         return 1;
     }
     if (pivot_root_path != NULL && pivot_to_root(pivot_root_path) != 0) {
+        return 1;
+    }
+    if (native_root_path != NULL && setup_native_root(native_root_path) != 0) {
         return 1;
     }
 
@@ -572,6 +788,7 @@ int main(int argc, char **argv) {
     const char *name = "achost-supervise";
     const char *launch_chroot = NULL;
     const char *launch_pivot_root = NULL;
+    const char *native_root = NULL;
     const char *launch_log_file = NULL;
     int command_index = -1;
     bool server_mode = false;
@@ -595,6 +812,8 @@ int main(int argc, char **argv) {
             launch_chroot = argv[++i];
         } else if (strcmp(argv[i], "--pivot-root") == 0 && i + 1 < argc) {
             launch_pivot_root = argv[++i];
+        } else if (strcmp(argv[i], "--native-root") == 0 && i + 1 < argc) {
+            native_root = argv[++i];
         } else if (strcmp(argv[i], "--log-file") == 0 && i + 1 < argc) {
             launch_log_file = argv[++i];
         } else if (strcmp(argv[i], "--") == 0) {
@@ -607,8 +826,8 @@ int main(int argc, char **argv) {
     }
 
     if (launch_mode) {
-        if (server_mode || client_mode || pid_file != NULL || socket_path != NULL || command_index <= 0 || command_index >= argc ||
-            (launch_chroot != NULL && launch_pivot_root != NULL)) {
+        if (server_mode || client_mode || pid_file != NULL || socket_path != NULL || native_root != NULL || command_index <= 0 ||
+            command_index >= argc || (launch_chroot != NULL && launch_pivot_root != NULL)) {
             usage(argv[0]);
             return 2;
         }
@@ -617,24 +836,24 @@ int main(int argc, char **argv) {
 
     if (server_mode) {
         if (client_mode || socket_path == NULL || pid_file == NULL || launch_chroot != NULL || launch_log_file != NULL ||
-            command_index != -1) {
+            command_index != -1 || (launch_pivot_root != NULL && native_root != NULL)) {
             usage(argv[0]);
             return 2;
         }
-        return run_server(socket_path, pid_file, launch_pivot_root);
+        return run_server(socket_path, pid_file, launch_pivot_root, native_root);
     }
 
     if (client_mode) {
-        if (socket_path == NULL || pid_file == NULL || launch_chroot != NULL || launch_pivot_root != NULL || launch_log_file != NULL ||
-            command_index <= 0 || command_index >= argc) {
+        if (socket_path == NULL || pid_file == NULL || launch_chroot != NULL || launch_pivot_root != NULL || native_root != NULL ||
+            launch_log_file != NULL || command_index <= 0 || command_index >= argc) {
             usage(argv[0]);
             return 2;
         }
         return send_client_request(socket_path, pid_file, name, argc - command_index, &argv[command_index]);
     }
 
-    if (launch_chroot != NULL || launch_pivot_root != NULL || launch_log_file != NULL || pid_file == NULL || command_index <= 0 ||
-        command_index >= argc) {
+    if (launch_chroot != NULL || launch_pivot_root != NULL || native_root != NULL || launch_log_file != NULL || pid_file == NULL ||
+        command_index <= 0 || command_index >= argc) {
         usage(argv[0]);
         return 2;
     }

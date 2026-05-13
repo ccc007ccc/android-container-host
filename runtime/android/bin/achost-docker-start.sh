@@ -46,6 +46,8 @@ ensure_supervisor_server() {
     rm -f "$ACHOST_SUPERVISOR_PID" "$ACHOST_SUPERVISOR_SOCKET" 2>/dev/null || true
     if [ "$ACHOST_USE_CHROOT" = "1" ] && [ "$ACHOST_CHROOT_LAUNCH_MODE" = "pivot" ]; then
         "$ACHOST_SUPERVISE" --server --socket "$ACHOST_SUPERVISOR_SOCKET" --pid-file "$ACHOST_SUPERVISOR_PID" --pivot-root "$ACHOST_CHROOT" >> "$ACHOST_SUPERVISOR_LOG" 2>&1 &
+    elif [ "$ACHOST_RUNTIME_MODE" = "native" ]; then
+        "$ACHOST_SUPERVISE" --server --socket "$ACHOST_SUPERVISOR_SOCKET" --pid-file "$ACHOST_SUPERVISOR_PID" --native-root "$ACHOST_NATIVE_ROOT" >> "$ACHOST_SUPERVISOR_LOG" 2>&1 &
     else
         "$ACHOST_SUPERVISE" --server --socket "$ACHOST_SUPERVISOR_SOCKET" --pid-file "$ACHOST_SUPERVISOR_PID" >> "$ACHOST_SUPERVISOR_LOG" 2>&1 &
     fi
@@ -77,7 +79,14 @@ start_daemon_command() {
                     "$ACHOST_SUPERVISE" --launch --log-file "$start_daemon_log_file" --chroot "$start_daemon_chroot" -- "$@" && return 0
             fi
         fi
+        if [ "$ACHOST_RUNTIME_MODE" = "native" ]; then
+            printf 'error: achost-supervise client failed for %s; native mode requires private /run namespace\n' "$start_daemon_name" >&2
+            return 1
+        fi
         printf 'warning: achost-supervise client failed for %s; falling back to direct launch\n' "$start_daemon_name" >&2
+    elif [ "$ACHOST_RUNTIME_MODE" = "native" ]; then
+        printf 'error: achost-supervise server unavailable for %s; native mode requires private /run namespace\n' "$start_daemon_name" >&2
+        return 1
     fi
     if [ "$start_daemon_chroot" = "-" ]; then
         "$@" >> "$start_daemon_log_file" 2>&1 &
@@ -252,12 +261,37 @@ cgroup2_diagnostics() {
 
 native_preflight() {
     printf 'native_path_run=%s\n' "$ACHOST_RUN"
+    printf 'native_path_native_root=%s\n' "$ACHOST_NATIVE_ROOT"
     printf 'native_path_docker_root=%s\n' "$ACHOST_DOCKER_ROOT"
     printf 'native_path_containerd_root=%s\n' "$ACHOST_CONTAINERD_ROOT"
     printf 'native_path_containerd_state=%s\n' "$ACHOST_CONTAINERD_STATE"
     path_state /run
     path_state /var/run
     path_state /sys/fs/cgroup
+    if grep -q ' /run ' /proc/mounts 2>/dev/null; then
+        printf 'global_run_mount=present\n'
+    else
+        printf 'global_run_mount=absent\n'
+    fi
+    if supervisor_server_running; then
+        supervisor_pid="$(cat "$ACHOST_SUPERVISOR_PID" 2>/dev/null || true)"
+        printf 'supervisor_pid=%s\n' "$supervisor_pid"
+        path_state "/proc/$supervisor_pid/root/run"
+        path_state "/proc/$supervisor_pid/root/var/run"
+        path_state "/proc/$supervisor_pid/root/sys/fs/cgroup"
+        path_state "/proc/$supervisor_pid/root/sys/fs/cgroup/memory/memory.limit_in_bytes"
+        path_state "/proc/$supervisor_pid/root/sys/fs/cgroup/cpuset/cpuset.cpus"
+        path_state "/proc/$supervisor_pid/root${DOCKER_HOST#unix://}"
+        path_state "/proc/$supervisor_pid/root$CONTAINERD_ADDRESS"
+        if [ -e "/proc/$supervisor_pid/root/var/run" ]; then
+            printf 'native_var_run_target=%s\n' "$(readlink "/proc/$supervisor_pid/root/var/run" 2>/dev/null || true)"
+        fi
+        if [ -e "/proc/$supervisor_pid/ns/mnt" ]; then
+            printf 'supervisor_mnt_ns=%s\n' "$(readlink "/proc/$supervisor_pid/ns/mnt" 2>/dev/null || true)"
+        fi
+    else
+        printf 'supervisor=not-running\n'
+    fi
     if has_devices_cgroup_mount; then
         printf 'devices_cgroup=mounted\n'
     elif cgroup_devices_available; then
@@ -286,6 +320,28 @@ native_preflight() {
     cgroup2_root_available && cgroup2_diagnostics /sys/fs/cgroup
 }
 
+daemon_namespace_diagnostics() {
+    [ "$ACHOST_RUNTIME_MODE" = "native" ] || return 0
+    supervisor_server_running || return 0
+    supervisor_pid="$(cat "$ACHOST_SUPERVISOR_PID" 2>/dev/null || true)"
+    supervisor_ns="$(readlink "/proc/$supervisor_pid/ns/mnt" 2>/dev/null || true)"
+    for item in "containerd:$ACHOST_CONTAINERD_PID" "dockerd:$ACHOST_DOCKERD_PID" "dockerd_launch:$ACHOST_DOCKERD_LAUNCH_PID"; do
+        daemon_name="${item%%:*}"
+        daemon_pid_file="${item#*:}"
+        [ -r "$daemon_pid_file" ] || continue
+        daemon_pid="$(cat "$daemon_pid_file" 2>/dev/null || true)"
+        case "$daemon_pid" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        daemon_ns="$(readlink "/proc/$daemon_pid/ns/mnt" 2>/dev/null || true)"
+        if [ -n "$supervisor_ns" ] && [ "$daemon_ns" = "$supervisor_ns" ]; then
+            printf '%s_mnt_ns=%s match=1\n' "$daemon_name" "$daemon_ns"
+        else
+            printf '%s_mnt_ns=%s match=0 supervisor=%s\n' "$daemon_name" "$daemon_ns" "$supervisor_ns"
+        fi
+    done
+}
+
 bind_chroot_path() {
     src="$1"
     bind_mount "$src" "$(chroot_path "$src")"
@@ -297,6 +353,32 @@ write_chroot_resolv_conf() {
     for server in $ACHOST_DNS_SERVERS; do
         printf 'nameserver %s\n' "$server" >> "$ACHOST_CHROOT/etc/resolv.conf"
     done
+}
+
+write_native_resolv_conf() {
+    mkdir -p "$ACHOST_NATIVE_ROOT/etc"
+    : > "$ACHOST_NATIVE_ROOT/etc/resolv.conf"
+    for server in $ACHOST_DNS_SERVERS; do
+        printf 'nameserver %s\n' "$server" >> "$ACHOST_NATIVE_ROOT/etc/resolv.conf"
+    done
+    cat > "$ACHOST_NATIVE_ROOT/etc/hosts" <<EOF
+127.0.0.1 localhost
+::1 localhost
+EOF
+}
+
+setup_native_ca_certs() {
+    [ -d /system/etc/security/cacerts ] || return 0
+    mkdir -p "$ACHOST_NATIVE_ROOT/etc/ssl"
+    rm -rf "$ACHOST_NATIVE_ROOT/etc/ssl/certs" 2>/dev/null || true
+    ln -s /system/etc/security/cacerts "$ACHOST_NATIVE_ROOT/etc/ssl/certs" 2>/dev/null || true
+}
+
+setup_native_root_files() {
+    mkdir -p "$ACHOST_NATIVE_ROOT" "$ACHOST_NATIVE_ROOT/etc" "$ACHOST_NATIVE_ROOT/run" "$ACHOST_NATIVE_ROOT/tmp" "$ACHOST_NATIVE_ROOT/var"
+    ln -sfn /run "$ACHOST_NATIVE_ROOT/var/run" 2>/dev/null || true
+    write_native_resolv_conf
+    setup_native_ca_certs
 }
 
 setup_chroot_ca_certs() {
@@ -588,7 +670,7 @@ for name in docker dockerd containerd containerd-shim-runc-v2 ctr runc; do
     require_executable "$name"
 done
 
-mkdir -p "$ACHOST_DOCKER_ROOT" "$ACHOST_DOCKER_EXEC_ROOT" "$ACHOST_CONTAINERD_ROOT" "$ACHOST_CONTAINERD_STATE" "$ACHOST_RUN" "$ACHOST_LOG_DIR" "$DOCKER_CONFIG/cli-plugins" "$(dirname -- "$ACHOST_CONTAINERD_CONFIG")"
+mkdir -p "$ACHOST_DOCKER_ROOT" "$ACHOST_DOCKER_EXEC_ROOT" "$ACHOST_CONTAINERD_ROOT" "$ACHOST_CONTAINERD_STATE" "$ACHOST_RUN" "$ACHOST_LOG_DIR" "$ACHOST_NATIVE_ROOT" "$DOCKER_CONFIG/cli-plugins" "$(dirname -- "$ACHOST_CONTAINERD_CONFIG")"
 printf 'runtime_mode=%s\n' "$ACHOST_RUNTIME_MODE"
 printf 'use_chroot=%s\n' "$ACHOST_USE_CHROOT"
 printf 'cgroup_mode=%s\n' "$ACHOST_CGROUP_MODE"
@@ -599,8 +681,10 @@ fi
 if [ "$ACHOST_USE_CHROOT" = "1" ]; then
     setup_chroot
 else
+    setup_native_root_files
     setup_devices_cgroup
     ensure_host_memory_cgroup >/dev/null || true
+    ensure_supervisor_server || printf 'warning: native supervisor server not ready; private /run unavailable\n' >&2
     native_preflight
 fi
 
@@ -653,6 +737,8 @@ else
         printf 'dockerd socket not ready: %s\n' "${DOCKER_HOST#unix://}" >&2
     fi
 fi
+
+daemon_namespace_diagnostics
 
 if reconcile_network_once; then
     printf 'network reconciled bridge=%s\n' "$CONTAINER_BRIDGE"

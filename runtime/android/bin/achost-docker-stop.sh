@@ -97,6 +97,8 @@ stop_pid_file dockerd-launch "$ACHOST_DOCKERD_LAUNCH_PID"
 stop_pid_file containerd "$ACHOST_CONTAINERD_PID"
 stop_named_processes dockerd
 stop_named_processes containerd
+stop_pid_file achost-supervise "$ACHOST_SUPERVISOR_PID"
+rm -f "$ACHOST_SUPERVISOR_SOCKET" 2>/dev/null || true
 unmount_chroot
 unmount_devices_cgroup
 case "$DOCKER_HOST" in

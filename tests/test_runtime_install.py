@@ -61,6 +61,8 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("/dev/memcg", docker_start_text)
             self.assertIn("ensure_host_memory_cgroup", docker_start_text)
             self.assertIn("mount_chroot_memory_cgroup_v1", docker_start_text)
+            self.assertIn("ACHOST_NATIVE_ROOT", docker_start_text)
+            self.assertIn("--native-root", docker_start_text)
             self.assertTrue(docker_smoke.stat().st_mode & stat.S_IXUSR)
             docker_smoke_text = docker_smoke.read_text()
             self.assertIn('DOCKER_SMOKE_MODE="${DOCKER_SMOKE_MODE:-local}"', docker_smoke_text)
@@ -141,8 +143,12 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("ACHOST_CGROUP_MODE=v1", runtime_config)
             self.assertIn("runtime_mode=", docker_start)
             self.assertIn("native_preflight", docker_start)
+            self.assertIn("setup_native_root_files", docker_start)
+            self.assertIn("daemon_namespace_diagnostics", docker_start)
+            self.assertIn("--native-root", docker_start)
             self.assertIn("ACHOST_RUNTIME_CONF", env)
             self.assertIn("ACHOST_BIND_PATHS", env)
+            self.assertIn("ACHOST_NATIVE_ROOT", env)
             self.assertIn("bind_chroot_path \"$bind_path\"", docker_start)
 
     def test_cgroup_v2_mode_writes_runtime_config(self):
