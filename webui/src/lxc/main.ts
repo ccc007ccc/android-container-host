@@ -439,7 +439,7 @@ function renderContainerRows(): string {
       const running = isRunning(item);
       const primaryAction = running ? 'stop' : 'start';
       const autostartAction = item.autostart ? 'autostart-off' : 'autostart-on';
-      return `<article class="entity-card">
+      return `<article class="entity-card lxc-container-card">
         <div class="entity-main">
           <strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong>
           <small>${escapeHtml(`${item.distro} ${item.release} / ${item.arch}`)}</small>

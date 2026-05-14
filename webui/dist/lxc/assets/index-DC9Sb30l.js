@@ -33,7 +33,7 @@ ${b(L)}`)}e.output=c.join(`
     ${O("LXC 控制台",`${l("刷新","refresh","ghost",!!e.busy)}${l("运行检查","check","",!!e.busy)}${l("导入 rootfs","open-import","ghost",!!e.busy)}`)}
     ${B("lxc-runtime","基础模块详情","LXC Runtime",tt([["LXC Runtime",t?.lxc_runtime],["容器目录",t?.lxc_containers],["Bridge",t?.bridge||"lxcbr0"],["Bridge subnet",t?.bridge_subnet],["Base 模块",t?.base_present?"present":"missing"],["Module target",t?.module_target||"lxc"],["Data root",t?.data_root],["API",e.apiPath]]),!1,A())}
     ${w("lxc-output")}
-  `}function st(){return e.containers.length?e.containers.map(t=>{const r=x(t),s=r?"stop":"start",o=t.autostart?"autostart-off":"autostart-on";return`<article class="entity-card">
+  `}function st(){return e.containers.length?e.containers.map(t=>{const r=x(t),s=r?"stop":"start",o=t.autostart?"autostart-off":"autostart-on";return`<article class="entity-card lxc-container-card">
         <div class="entity-main">
           <strong title="${n(t.name)}">${n(t.name)}</strong>
           <small>${n(`${t.distro} ${t.release} / ${t.arch}`)}</small>

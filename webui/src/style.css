@@ -460,6 +460,39 @@ small {
   flex-wrap: nowrap;
 }
 
+.lxc-container-card {
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "main status"
+    "meta meta"
+    "actions actions";
+  align-items: start;
+}
+
+.lxc-container-card .entity-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  padding-top: 0.28rem;
+  border-top: 1px solid var(--line);
+}
+
+.lxc-container-card .entity-actions button {
+  flex: 1 1 calc(50% - 0.46rem);
+  min-width: 6.2rem;
+}
+
+.lxc-container-card .entity-main strong,
+.lxc-container-card .entity-main small,
+.lxc-container-card .entity-meta span,
+.lxc-container-card .entity-meta small {
+  white-space: normal;
+}
+
+.lxc-container-card .entity-meta span,
+.lxc-container-card .entity-meta small {
+  word-break: break-all;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
@@ -857,6 +890,10 @@ small {
     justify-content: flex-end;
     max-width: 34rem;
   }
+
+  .lxc-container-card .entity-actions button {
+    flex: 0 0 auto;
+  }
 }
 
 @media (min-width: 1040px) {
@@ -909,6 +946,13 @@ small {
   .entity-card {
     grid-template-columns: minmax(13rem, 1fr) minmax(16rem, 1.25fr) minmax(10rem, 0.75fr) auto;
     grid-template-areas: "main meta status actions";
+  }
+
+  .lxc-container-card {
+    grid-template-columns: minmax(13rem, 0.9fr) minmax(18rem, 1.35fr) auto;
+    grid-template-areas:
+      "main meta status"
+      "actions actions actions";
   }
 
   .image-card {
