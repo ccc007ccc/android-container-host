@@ -19,6 +19,13 @@ else
     DOCKER_ROOT="${ACHOST_DOCKER_MODULE:-$ACHOST}"
     DOCKER_BIN="$DOCKER_ROOT/bin"
 fi
+if [ -x "$SCRIPT_DIR/achost-lxc-runtime" ] || [ -x "$SCRIPT_DIR/runtime-smoke-lxc.sh" ]; then
+    LXC_ROOT="$ACHOST"
+    LXC_BIN="$SCRIPT_DIR"
+else
+    LXC_ROOT="${ACHOST_LXC_MODULE:-$ACHOST}"
+    LXC_BIN="$LXC_ROOT/bin"
+fi
 
 section() {
     printf '\n## %s\n' "$1"
@@ -114,8 +121,34 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "docker" ]; then
 fi
 
 if [ "$MODE" = "all" ] || [ "$MODE" = "lxc" ]; then
-    run_script "LXC checkconfig" "$SCRIPT_DIR/verify-lxc-checkconfig.sh" 1
-    run_script "LXC runtime smoke" "$SCRIPT_DIR/runtime-smoke-lxc.sh" 1
+    ACHOST="$LXC_ROOT"
+    ACHOST_BIN="$LXC_BIN"
+    ACHOST_ETC="$LXC_ROOT/etc"
+    ACHOST_COMMON="${ACHOST_COMMON:-$ACHOST_BASE}"
+    ACHOST_COMMON_BIN="$COMMON_BIN"
+    ACHOST_MODULE_TARGET="lxc"
+    ACHOST_LXC_MODULE="$LXC_ROOT"
+    ACHOST_LXC_RUNTIME="$LXC_BIN/achost-lxc-runtime"
+    ACHOST_LXC="$LXC_ROOT/lxc"
+    ACHOST_LXC_BIN="$ACHOST_LXC/bin"
+    ACHOST_LXC_ETC="$ACHOST_ETC/lxc"
+    ACHOST_LXC_VAR="${ACHOST_LXC_VAR:-/data/adb/achost/lxc}"
+    ACHOST_LXC_RUN="${ACHOST_LXC_RUN:-/data/adb/achost/run/lxc}"
+    ACHOST_LXC_LOG="${ACHOST_LXC_LOG:-/data/adb/achost/log/lxc}"
+    ACHOST_LXC_ROOTFS="${ACHOST_LXC_ROOTFS:-$ACHOST_LXC_VAR/rootfs}"
+    ACHOST_LXC_CONTAINERS="${ACHOST_LXC_CONTAINERS:-$ACHOST_LXC_VAR/containers}"
+    LXC_BRIDGE="${LXC_BRIDGE:-lxcbr0}"
+    LXC_SUBNET="${LXC_SUBNET:-172.32.0.0/16}"
+    CONTAINER_BRIDGE="$LXC_BRIDGE"
+    PATH="$LXC_BIN:$ACHOST_LXC_BIN:$COMMON_BIN:$PATH"
+    LD_LIBRARY_PATH="$ACHOST_LXC/lib:$LXC_ROOT/lib:${LD_LIBRARY_PATH:-}"
+    export ACHOST ACHOST_BIN ACHOST_ETC ACHOST_COMMON ACHOST_COMMON_BIN ACHOST_MODULE_TARGET ACHOST_LXC_MODULE ACHOST_LXC_RUNTIME ACHOST_LXC ACHOST_LXC_BIN ACHOST_LXC_ETC ACHOST_LXC_VAR ACHOST_LXC_RUN ACHOST_LXC_LOG ACHOST_LXC_ROOTFS ACHOST_LXC_CONTAINERS LXC_BRIDGE LXC_SUBNET CONTAINER_BRIDGE PATH LD_LIBRARY_PATH
+    run_script "LXC write configs" "$LXC_BIN/achost-lxc-runtime" 1 write-configs
+    run_script "LXC host validation" "$LXC_BIN/achost-lxc-runtime" 1 validate-host
+    run_script "LXC asset validation" "$LXC_BIN/achost-lxc-runtime" 1 validate-assets
+    run_script "LXC prepare bridge" "$LXC_BIN/achost-lxc-runtime" 1 prepare-bridge
+    run_script "LXC checkconfig" "$LXC_BIN/verify-lxc-checkconfig.sh" 0
+    run_script "LXC runtime smoke" "$LXC_BIN/runtime-smoke-lxc.sh" 1
 fi
 
 run_script "collect runtime logs" "$SCRIPT_DIR/collect-logs.sh" 0

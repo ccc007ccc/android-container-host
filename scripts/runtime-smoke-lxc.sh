@@ -1,13 +1,24 @@
 #!/system/bin/sh
 set -u
 
-CONTAINER_NAME="${CONTAINER_NAME:-achost-alpine}"
-DISTRO="${DISTRO:-alpine}"
-RELEASE="${RELEASE:-edge}"
+STAMP="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if [ -r "$SCRIPT_DIR/achost-container-env.sh" ]; then
+    ACHOST="${ACHOST:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}"
+    ACHOST_BIN="$SCRIPT_DIR"
+    . "$SCRIPT_DIR/achost-container-env.sh"
+fi
+
+CONTAINER_NAME="${CONTAINER_NAME:-achost-lxc-smoke-$STAMP}"
+ROOTFS_ASSET="${ROOTFS_ASSET:-${LXC_ROOTFS_ASSET:-${ACHOST_LXC_ROOTFS_ASSET:-}}}"
+ROOTFS_SHA256="${ROOTFS_SHA256:-${LXC_ROOTFS_SHA256:-${ACHOST_LXC_ROOTFS_SHA256:-}}}"
+DISTRO="${DISTRO:-unknown}"
+RELEASE="${RELEASE:-unknown}"
 ARCH="${ARCH:-arm64}"
-PING_TARGET="${PING_TARGET:-1.1.1.1}"
 OUT_DIR="${OUT_DIR:-}"
+LXC_RUNTIME="${ACHOST_LXC_RUNTIME:-$SCRIPT_DIR/achost-lxc-runtime}"
 FAILURES=0
+IMPORTED=0
 
 if [ -n "$OUT_DIR" ]; then
     mkdir -p "$OUT_DIR"
@@ -41,39 +52,51 @@ run_optional() {
 }
 
 cleanup() {
-    lxc-stop -n "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    if [ "$IMPORTED" = "1" ]; then
+        "$LXC_RUNTIME" stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        "$LXC_RUNTIME" destroy "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    fi
 }
 
-command -v lxc-start >/dev/null 2>&1 || {
-    printf 'lxc tools not found\n' >&2
+if [ ! -x "$LXC_RUNTIME" ]; then
+    printf 'missing executable: %s\n' "$LXC_RUNTIME" >&2
     exit 2
-}
+fi
 
 trap cleanup EXIT INT TERM
 
-if command -v lxc-checkconfig >/dev/null 2>&1; then
-    run_required "lxc-checkconfig" lxc-checkconfig
-else
-    run_optional "lxc-checkconfig unavailable" sh -c 'echo lxc-checkconfig command not found'
-fi
+run_required "LXC write configs" "$LXC_RUNTIME" write-configs
+run_required "LXC host validation" "$LXC_RUNTIME" validate-host
+run_required "LXC asset validation" "$LXC_RUNTIME" validate-assets
+run_required "LXC prepare bridge" "$LXC_RUNTIME" prepare-bridge
+run_required "LXC list" "$LXC_RUNTIME" list --json
 
-if lxc-info -n "$CONTAINER_NAME" >/dev/null 2>&1; then
-    run_optional "existing container" lxc-info -n "$CONTAINER_NAME"
+if [ -z "$ROOTFS_ASSET" ]; then
+    section "LXC container smoke"
+    printf 'rootfs_asset=missing\n'
+    printf 'skipped=1 reason=no ROOTFS_ASSET/LXC_ROOTFS_ASSET/ACHOST_LXC_ROOTFS_ASSET provided\n'
 else
-    if command -v lxc-create >/dev/null 2>&1; then
-        run_required "lxc-create download" lxc-create -n "$CONTAINER_NAME" -t download -- -d "$DISTRO" -r "$RELEASE" -a "$ARCH"
+    if [ ! -r "$ROOTFS_ASSET" ]; then
+        section "LXC rootfs asset"
+        printf 'missing rootfs asset: %s\n' "$ROOTFS_ASSET" >&2
+        FAILURES=$((FAILURES + 1))
     else
-        printf 'lxc-create not found and container %s does not exist\n' "$CONTAINER_NAME" >&2
-        exit 2
+        if [ -n "$ROOTFS_SHA256" ]; then
+            run_required "LXC import rootfs" "$LXC_RUNTIME" import-rootfs --name "$CONTAINER_NAME" --rootfs-asset "$ROOTFS_ASSET" --distro "$DISTRO" --release "$RELEASE" --arch "$ARCH" --sha256 "$ROOTFS_SHA256"
+        else
+            run_required "LXC import rootfs" "$LXC_RUNTIME" import-rootfs --name "$CONTAINER_NAME" --rootfs-asset "$ROOTFS_ASSET" --distro "$DISTRO" --release "$RELEASE" --arch "$ARCH"
+        fi
+        IMPORTED=1
+        run_required "LXC start" "$LXC_RUNTIME" start "$CONTAINER_NAME"
+        run_required "LXC status" "$LXC_RUNTIME" status "$CONTAINER_NAME" --json
+        run_required "LXC smoke exec" "$LXC_RUNTIME" smoke "$CONTAINER_NAME"
+        run_optional "LXC logs" "$LXC_RUNTIME" logs "$CONTAINER_NAME" --lines 200
+        run_required "LXC stop" "$LXC_RUNTIME" stop "$CONTAINER_NAME"
+        run_required "LXC destroy" "$LXC_RUNTIME" destroy "$CONTAINER_NAME"
+        IMPORTED=0
     fi
 fi
 
-run_required "lxc-start" lxc-start -n "$CONTAINER_NAME" -d
-run_required "lxc-info" lxc-info -n "$CONTAINER_NAME"
-run_required "lxc uname" lxc-attach -n "$CONTAINER_NAME" -- uname -a
-run_required "lxc ip addr" lxc-attach -n "$CONTAINER_NAME" -- ip addr
-run_required "lxc ping" lxc-attach -n "$CONTAINER_NAME" -- ping -c 3 "$PING_TARGET"
-run_required "lxc-stop" lxc-stop -n "$CONTAINER_NAME"
 run_optional "recent dmesg" sh -c 'dmesg 2>/dev/null | tail -200'
 run_optional "recent kernel logcat" sh -c 'logcat -b kernel -d 2>/dev/null | tail -200'
 
@@ -86,4 +109,4 @@ if [ "$FAILURES" -ne 0 ]; then
     exit 1
 fi
 
-printf 'LXC smoke passed\n'
+printf 'LXC smoke completed\n'

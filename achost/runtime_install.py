@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
 import shutil
@@ -38,9 +39,11 @@ COMMON_RUNTIME_FILES = (
     (SCRIPT_ROOT / "collect-logs.sh", "achost/bin/collect-logs.sh"),
 )
 DOCKER_RUNTIME_FILES = (
-    (RUNTIME_ROOT / "docker" / "bin" / "achost-webui-api.sh", "achost/bin/achost-webui-api.sh"),
     (SCRIPT_ROOT / "docker" / "runtime-smoke-docker.sh", "achost/bin/runtime-smoke-docker.sh"),
     (SCRIPT_ROOT / "docker" / "runtime-docker-feature-test.sh", "achost/bin/runtime-docker-feature-test.sh"),
+)
+WEBUI_RUNTIME_FILES = (
+    (RUNTIME_ROOT / "bin" / "achost-webui-api.sh", "achost/bin/achost-webui-api.sh"),
 )
 LXC_RUNTIME_FILES = (
     (RUNTIME_ROOT / "bin" / "achost-lxc-validate.sh", "achost/bin/achost-lxc-validate.sh"),
@@ -51,6 +54,17 @@ LXC_RUNTIME_FILES = (
 LXC_FILES = ("android-common.conf", "default.conf", "unprivileged.conf")
 DOCKER_REQUIRED_BINARIES = ("docker", "dockerd", "containerd", "containerd-shim-runc-v2", "ctr", "runc")
 DOCKER_OPTIONAL_BINARIES = ("containerd-shim", "docker-init", "docker-proxy", "containerd-stress")
+LXC_REQUIRED_BINARIES = (
+    "lxc-start",
+    "lxc-stop",
+    "lxc-attach",
+    "lxc-info",
+    "lxc-ls",
+    "lxc-destroy",
+    "lxc-execute",
+    "lxc-checkconfig",
+)
+LXC_OPTIONAL_BINARIES = ("lxc-create", "lxc-copy", "lxc-console")
 COMPOSE_ASSET_NAMES = ("docker-compose", "docker-compose-linux-aarch64", "docker-compose-linux-arm64")
 COMPOSE_PLUGIN_REL = "achost/etc/docker/cli-plugins/docker-compose"
 COMPOSE_STANDALONE_REL = "achost/bin/docker-compose"
@@ -70,8 +84,11 @@ RUNTIME_CORE_DEST = "achost/bin/achost-runtime-core"
 DOCKER_RUNTIME_CRATE = PROJECT_ROOT / "crates" / "achost-docker-runtime"
 DOCKER_RUNTIME_TARGET = RUST_ANDROID_TARGET
 DOCKER_RUNTIME_DEST = "achost/bin/achost-docker-runtime"
-WEBUI_DIST = PROJECT_ROOT / "webui" / "dist"
-LXC_ALLOWED_ROOTS = ("bin", "lib", "lib64", "share")
+LXC_RUNTIME_CRATE = PROJECT_ROOT / "crates" / "achost-lxc-runtime"
+LXC_RUNTIME_TARGET = RUST_ANDROID_TARGET
+LXC_RUNTIME_DEST = "achost/bin/achost-lxc-runtime"
+WEBUI_DIST_ROOT = PROJECT_ROOT / "webui" / "dist"
+LXC_ALLOWED_ROOTS = ("bin", "lib", "lib64", "libexec", "share")
 
 
 @dataclass(frozen=True)
@@ -155,14 +172,14 @@ MODULE_SPECS = {
         "lxc",
         "achost-lxc",
         "ACHost LXC 模块",
-        "提供 ACHost 的 LXC 配置、用户态文件和验证工具，依赖基础模块运行。",
+        "提供 ACHost 的通用 LXC 运行时、配置、用户态文件和容器管理 WebUI，依赖基础模块运行。",
         SPLIT_DATA_ROOT,
         ("achost-base",),
         ("lxc",),
         False,
         False,
         True,
-        False,
+        True,
         False,
     ),
 }
@@ -210,7 +227,14 @@ def generate_runtime_package(
         raise ValueError("start_docker_on_boot is only supported for kernelsu-module mode")
 
     spec = MODULE_SPECS[module_target]
-    validate_assets_for_module(spec, docker_asset, compose_asset, buildx_asset, buildkit_asset, lxc_asset)
+    validate_assets_for_module(
+        spec,
+        docker_asset,
+        compose_asset,
+        buildx_asset,
+        buildkit_asset,
+        lxc_asset,
+    )
 
     root = Path(output).expanduser().resolve()
     ensure_empty_output(root)
@@ -245,6 +269,10 @@ def generate_runtime_package(
         )
         files.extend(write_docker_wrappers(root, mode, install_prefix, spec))
 
+    if mode == "manual" or spec.include_webui:
+        for src, dst in WEBUI_RUNTIME_FILES:
+            files.append(copy_text_file(src, root / dst, root, executable=True, category="webui"))
+
     if mode == "manual" or spec.include_lxc:
         for src, dst in LXC_RUNTIME_FILES:
             files.append(copy_text_file(src, root / dst, root, executable=True, category="lxc"))
@@ -273,8 +301,12 @@ def generate_runtime_package(
     if mode == "manual" or spec.include_docker:
         docker_runtime_report, docker_runtime_files = install_docker_runtime_helper(root)
         files.extend(docker_runtime_files)
+    lxc_runtime_report: dict[str, Any] | None = None
+    if mode == "manual" or spec.include_lxc:
+        lxc_runtime_report, lxc_runtime_files = install_lxc_runtime_helper(root)
+        files.extend(lxc_runtime_files)
     webui_api_report: dict[str, Any] | None = None
-    if mode == "manual" or spec.include_docker:
+    if mode == "manual" or spec.include_webui:
         webui_api_report, webui_api_files = install_webui_api_helper(root)
         files.extend(webui_api_files)
     assets: dict[str, Any] = {
@@ -285,6 +317,7 @@ def generate_runtime_package(
         "lxc": None,
         "runtime_core": runtime_core_report,
         "docker_runtime": docker_runtime_report,
+        "lxc_runtime": lxc_runtime_report,
         "supervisor": supervisor_report,
         "webui_api": webui_api_report,
         "start_docker_on_boot": start_docker_on_boot,
@@ -317,7 +350,6 @@ def generate_runtime_package(
         lxc_report, lxc_files = install_lxc_asset(lxc_asset, root, lxc_sha256)
         assets["lxc"] = lxc_report
         files.extend(lxc_files)
-
     if mode == "kernelsu-module" and spec.include_webui:
         files.extend(install_webui(root, spec))
     entrypoints = write_mode_files(root, mode, spec, files, start_docker_on_boot=start_docker_on_boot)
@@ -332,7 +364,11 @@ def generate_runtime_package(
         "requires": list(spec.requires) if mode == "kernelsu-module" else [],
         "provides": list(spec.provides) if mode == "kernelsu-module" else [],
         "included_categories": included_categories,
-        "excluded_categories": [category for category in ("common", "docker", "lxc", "webui", "supervisor") if category not in included_categories],
+        "excluded_categories": [
+            category
+            for category in ("common", "docker", "lxc", "webui", "supervisor")
+            if category not in included_categories
+        ],
         "cgroup_mode": cgroup_mode,
         "docker_runtime_mode": docker_runtime_mode,
         "output": str(root),
@@ -413,6 +449,13 @@ def write_runtime_config(root: Path, mode: str, spec: ModuleSpec, docker_runtime
                 "ACHOST_BASE=/data/adb/modules/achost-base/achost",
                 "ACHOST_DOCKER_MODULE=/data/adb/modules/achost-docker/achost",
                 "ACHOST_LXC_MODULE=/data/adb/modules/achost-lxc/achost",
+                f"ACHOST_LXC_VAR={spec.data_root}/lxc",
+                f"ACHOST_LXC_RUN={spec.data_root}/run/lxc",
+                f"ACHOST_LXC_LOG={spec.data_root}/log/lxc",
+                f"ACHOST_LXC_ROOTFS={spec.data_root}/lxc/rootfs",
+                f"ACHOST_LXC_CONTAINERS={spec.data_root}/lxc/containers",
+                "LXC_BRIDGE=lxcbr0",
+                "LXC_SUBNET=172.32.0.0/16",
             )
         )
     dst = root / "achost" / "etc" / "achost-runtime.conf"
@@ -589,6 +632,44 @@ install_docker_cli_wrapper
 '''
 
 
+def ksu_lxc_wrapper_install_script(install_prefix: str) -> str:
+    return f'''
+install_lxc_cli_wrappers() {{
+    ksu_bin="/data/adb/ksu/bin"
+    mkdir -p "$ksu_bin" 2>/dev/null || return 0
+    [ -d "$ACHOST/lxc/bin" ] || return 0
+    for src in "$ACHOST"/lxc/bin/lxc* "$ACHOST"/lxc/bin/lxd*; do
+        [ -f "$src" ] || continue
+        [ -x "$src" ] || continue
+        name="${{src##*/}}"
+        case "$name" in
+            lxc*|lxd*) ;;
+            *) continue ;;
+        esac
+        cat > "$ksu_bin/$name" <<'ACHOST_LXC_WRAPPER'
+#!/system/bin/sh
+# ACHOST_LXC_WRAPPER
+set -u
+name="${{0##*/}}"
+ACHOST="${{ACHOST:-{install_prefix}}}"
+if [ -r "$ACHOST/bin/achost-container-env.sh" ]; then
+    . "$ACHOST/bin/achost-container-env.sh"
+elif [ -r "/data/adb/modules/achost-base/achost/bin/achost-container-env.sh" ]; then
+    ACHOST_BASE="${{ACHOST_BASE:-/data/adb/modules/achost-base/achost}}"
+    . "$ACHOST_BASE/bin/achost-container-env.sh"
+else
+    printf 'ACHost env not found\n' >&2
+    exit 1
+fi
+exec "$ACHOST/lxc/bin/$name" "$@"
+ACHOST_LXC_WRAPPER
+        chmod 0755 "$ksu_bin/$name" 2>/dev/null || true
+    done
+}}
+install_lxc_cli_wrappers
+'''
+
+
 def copy_text_file(
     src: Path,
     dst: Path,
@@ -631,6 +712,19 @@ def install_docker_runtime_helper(root: Path) -> tuple[dict[str, Any], list[Runt
     )
 
 
+def install_lxc_runtime_helper(root: Path) -> tuple[dict[str, Any], list[RuntimeFile]]:
+    return install_rust_runtime_binary(
+        root,
+        RustRuntimeBinary(
+            "achost-lxc-runtime",
+            LXC_RUNTIME_CRATE,
+            LXC_RUNTIME_TARGET,
+            LXC_RUNTIME_DEST,
+            "lxc",
+        ),
+    )
+
+
 def install_supervisor_helper(root: Path) -> tuple[dict[str, Any], list[RuntimeFile]]:
     return install_rust_runtime_binary(
         root,
@@ -641,7 +735,7 @@ def install_supervisor_helper(root: Path) -> tuple[dict[str, Any], list[RuntimeF
 def install_webui_api_helper(root: Path) -> tuple[dict[str, Any], list[RuntimeFile]]:
     return install_rust_runtime_binary(
         root,
-        RustRuntimeBinary("achost-webui-api", WEBUI_API_CRATE, WEBUI_API_TARGET, WEBUI_API_DEST, "docker"),
+        RustRuntimeBinary("achost-webui-api", WEBUI_API_CRATE, WEBUI_API_TARGET, WEBUI_API_DEST, "webui"),
     )
 
 
@@ -690,16 +784,23 @@ def install_rust_runtime_binary(root: Path, binary: RustRuntimeBinary) -> tuple[
     }, [RuntimeFile(str(dst.relative_to(root)), str(binary.crate.relative_to(PROJECT_ROOT)), True, category=binary.category)]
 
 
+def webui_dist_for_target(target: str) -> Path:
+    if target == "lxc":
+        return WEBUI_DIST_ROOT / "lxc"
+    return WEBUI_DIST_ROOT / "docker"
+
+
 def install_webui(root: Path, spec: ModuleSpec) -> list[RuntimeFile]:
-    index = WEBUI_DIST / "index.html"
+    webui_dist = webui_dist_for_target(spec.target)
+    index = webui_dist / "index.html"
     if not index.exists():
-        raise FileNotFoundError(f"WebUI dist not found: {WEBUI_DIST}; run npm install && npm run build in webui")
+        raise FileNotFoundError(f"WebUI dist not found: {webui_dist}; run npm install && npm run build in webui")
 
     files: list[RuntimeFile] = []
-    for src in sorted(WEBUI_DIST.rglob("*")):
+    for src in sorted(webui_dist.rglob("*")):
         if src.is_dir():
             continue
-        rel = src.relative_to(WEBUI_DIST)
+        rel = src.relative_to(webui_dist)
         dst = root / "webroot" / rel
         copy_file(src, dst, 0o644)
         files.append(RuntimeFile(str(dst.relative_to(root)), str(src.relative_to(PROJECT_ROOT)), False, category="webui"))
@@ -709,6 +810,18 @@ def install_webui(root: Path, spec: ModuleSpec) -> list[RuntimeFile]:
         "moduleId": spec.module_id,
         "api": f"/data/adb/modules/{spec.module_id}/achost/bin/achost-webui-api.sh",
     }
+    inline_config = json.dumps(config, separators=(",", ":"), sort_keys=True)
+    index_dst = root / "webroot" / "index.html"
+    index_text = index_dst.read_text()
+    config_meta = f'<meta name="achost-webui-config" content="{html.escape(inline_config, quote=True)}" />'
+    if "<head>" in index_text:
+        index_text = index_text.replace("<head>", f"<head>\n    {config_meta}", 1)
+    elif "</head>" in index_text:
+        index_text = index_text.replace("</head>", f"  {config_meta}\n  </head>", 1)
+    else:
+        index_text = config_meta + index_text
+    index_dst.write_text(index_text)
+
     dst = root / "webroot" / "achost-webui-config.json"
     dst.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
     files.append(RuntimeFile(str(dst.relative_to(root)), None, False, category="webui"))
@@ -962,7 +1075,8 @@ def install_lxc_asset(asset: str | Path, root: Path, expected_sha256: str | None
     verify_sha256(asset_path, digest, expected_sha256)
 
     files: list[RuntimeFile] = []
-    extracted: list[str] = []
+    extracted_paths: list[str] = []
+    extracted_binaries: dict[str, str] = {}
     with tarfile.open(asset_path, "r:*") as archive:
         for member in archive.getmembers():
             if not member.isfile():
@@ -974,16 +1088,26 @@ def install_lxc_asset(asset: str | Path, root: Path, expected_sha256: str | None
             executable = "/bin/" in f"/{rel_path}"
             mode = 0o755 if executable else (member.mode & 0o777 or 0o644)
             copy_tar_member(archive, member, dst, mode)
-            extracted.append(rel_path)
+            extracted_paths.append(rel_path)
+            if rel_path.startswith("achost/lxc/bin/"):
+                name = PurePosixPath(rel_path).name
+                if name not in extracted_binaries:
+                    extracted_binaries[name] = member.name
             files.append(RuntimeFile(str(dst.relative_to(root)), str(asset_path), executable, "lxc", "lxc-asset"))
 
-    if not extracted:
+    if not extracted_paths:
         raise ValueError("lxc asset contained no supported files")
+    missing = [name for name in LXC_REQUIRED_BINARIES if name not in extracted_binaries]
+    if missing:
+        raise ValueError(f"lxc asset missing required binaries: {', '.join(missing)}")
 
     return {
         "source": str(asset_path),
         "sha256": digest,
-        "files": sorted(extracted),
+        "required_binaries": list(LXC_REQUIRED_BINARIES),
+        "optional_binaries": [name for name in LXC_OPTIONAL_BINARIES if name in extracted_binaries],
+        "files": {name: extracted_binaries[name] for name in sorted(extracted_binaries)},
+        "paths": sorted(extracted_paths),
     }, files
 
 
@@ -1214,6 +1338,14 @@ if [ "$(cat "$AUTOSTART_FILE" 2>/dev/null || printf '0')" = "1" ] && [ -x "$ACHO
     "$ACHOST/bin/achost-docker-runtime" start >> "$ACHOST_LOG_DIR/dockerd-start.log" 2>&1 &
 fi
 """
+    lxc_start = ""
+    if spec.include_lxc:
+        lxc_start = ksu_lxc_wrapper_install_script(install_prefix_for_mode("kernelsu-module", spec)) + """
+chmod 0755 "$ACHOST/lxc/bin"/* 2>/dev/null || true
+if [ -x "$ACHOST/bin/achost-lxc-runtime" ]; then
+    "$ACHOST/bin/achost-lxc-runtime" autostart >> "$ACHOST_LOG_DIR/lxc-autostart.log" 2>&1 &
+fi
+"""
     return f"""#!/system/bin/sh
 MODDIR="${{0%/*}}"
 ACHOST="${{ACHOST:-$MODDIR/achost}}"
@@ -1234,9 +1366,9 @@ ACHOST_LOG_DIR="${{ACHOST_LOG_DIR:-$ACHOST_VAR/log}}"
 ACHOST_CHROOT="${{ACHOST_CHROOT:-$ACHOST_VAR/chroot}}"
 ACHOST_NATIVE_ROOT="${{ACHOST_NATIVE_ROOT:-$ACHOST_VAR/native-root}}"
 ACHOST_CONTAINERD_STATE="${{ACHOST_CONTAINERD_STATE:-$ACHOST_VAR/containerd/state}}"
-mkdir -p "$ACHOST_VAR" "$ACHOST_CONFIG" "$ACHOST_VAR/docker" "$ACHOST_RUN" "$ACHOST_LOG_DIR" "$ACHOST_CHROOT" "$ACHOST_NATIVE_ROOT" "$ACHOST_VAR/containerd/root" "$ACHOST_CONTAINERD_STATE" "$ACHOST_VAR/bind-mounts" 2>/dev/null || true
+mkdir -p "$ACHOST_VAR" "$ACHOST_CONFIG" "$ACHOST_VAR/docker" "$ACHOST_VAR/lxc" "$ACHOST_VAR/lxc/rootfs" "$ACHOST_VAR/lxc/containers" "$ACHOST_VAR/run/lxc" "$ACHOST_VAR/log/lxc" "$ACHOST_RUN" "$ACHOST_LOG_DIR" "$ACHOST_CHROOT" "$ACHOST_NATIVE_ROOT" "$ACHOST_VAR/containerd/root" "$ACHOST_CONTAINERD_STATE" "$ACHOST_VAR/bind-mounts" 2>/dev/null || true
 {prune_stale_runtime_entrypoints_function()}prune_stale_runtime_entrypoints "$ACHOST/bin"
-{common_start}{docker_start}"""
+{common_start}{docker_start}{lxc_start}"""
 
 
 def customize_script(spec: ModuleSpec, start_docker_on_boot: bool = False) -> str:
@@ -1254,6 +1386,11 @@ if [ -d "$ACHOST/var/docker" ] && [ -n "$(ls -A "$ACHOST/var/docker" 2>/dev/null
     print_msg "ACHost: persistent Docker data now lives at $ACHOST_DATA/docker."
 fi
 """
+    lxc_setup = ""
+    if spec.include_lxc:
+        lxc_setup = ksu_lxc_wrapper_install_script(install_prefix_for_mode("kernelsu-module", spec)) + """
+chmod 0755 "$ACHOST/lxc/bin"/* 2>/dev/null || true
+"""
     return f"""#!/system/bin/sh
 MODDIR="${{MODPATH:-${{0%/*}}}}"
 ACHOST="$MODDIR/achost"
@@ -1267,10 +1404,10 @@ print_msg() {{
     fi
 }}
 
-mkdir -p "$ACHOST_DATA" "$ACHOST_DATA/config" "$ACHOST_DATA/docker" "$ACHOST_DATA/run" "$ACHOST_DATA/log" "$ACHOST_DATA/chroot" "$ACHOST_DATA/native-root" "$ACHOST_DATA/containerd/root" "$ACHOST_DATA/containerd/state" "$ACHOST_DATA/bind-mounts" 2>/dev/null || true
+mkdir -p "$ACHOST_DATA" "$ACHOST_DATA/config" "$ACHOST_DATA/docker" "$ACHOST_DATA/lxc" "$ACHOST_DATA/lxc/rootfs" "$ACHOST_DATA/lxc/containers" "$ACHOST_DATA/run" "$ACHOST_DATA/run/lxc" "$ACHOST_DATA/log" "$ACHOST_DATA/log/lxc" "$ACHOST_DATA/chroot" "$ACHOST_DATA/native-root" "$ACHOST_DATA/containerd/root" "$ACHOST_DATA/containerd/state" "$ACHOST_DATA/bind-mounts" 2>/dev/null || true
 chmod 0755 "$MODDIR/post-fs-data.sh" "$MODDIR/service.sh" "$MODDIR/uninstall.sh" 2>/dev/null || true
 chmod 0755 "$ACHOST/bin"/* 2>/dev/null || true
-{prune_stale_runtime_entrypoints_function()}prune_stale_runtime_entrypoints "$ACHOST/bin"
+{lxc_setup}{prune_stale_runtime_entrypoints_function()}prune_stale_runtime_entrypoints "$ACHOST/bin"
 {docker_setup}"""
 
 
@@ -1286,6 +1423,18 @@ fi
         docker_cleanup = """
 if [ -r /data/adb/ksu/bin/docker ] && grep -q 'ACHOST_DOCKER_WRAPPER' /data/adb/ksu/bin/docker 2>/dev/null; then
     rm -f /data/adb/ksu/bin/docker 2>/dev/null || true
+fi
+"""
+    lxc_cleanup = ""
+    if spec.include_lxc:
+        lxc_cleanup = """
+if [ -d /data/adb/ksu/bin ]; then
+    for wrapper in /data/adb/ksu/bin/lxc* /data/adb/ksu/bin/lxd*; do
+        [ -e "$wrapper" ] || continue
+        if [ -r "$wrapper" ] && grep -q 'ACHOST_LXC_WRAPPER' "$wrapper" 2>/dev/null; then
+            rm -f "$wrapper" 2>/dev/null || true
+        fi
+    done
 fi
 """
     common_stop = ""
@@ -1313,7 +1462,7 @@ elif [ -r "/data/adb/modules/achost-base/achost/bin/achost-container-env.sh" ]; 
     ACHOST_BASE="${{ACHOST_BASE:-/data/adb/modules/achost-base/achost}}"
     . "$ACHOST_BASE/bin/achost-container-env.sh"
 fi
-{docker_stop}{common_stop}{docker_cleanup}
+{docker_stop}{common_stop}{docker_cleanup}{lxc_cleanup}
 rm -rf "${{ACHOST_RUN:-$ACHOST_DATA/run}}" "${{ACHOST_LOG_DIR:-$ACHOST_DATA/log}}" "${{ACHOST_CHROOT:-$ACHOST_DATA/chroot}}" "${{ACHOST_NATIVE_ROOT:-$ACHOST_DATA/native-root}}" "${{ACHOST_CONTAINERD_STATE:-$ACHOST_DATA/containerd/state}}" 2>/dev/null || true
 mkdir -p "$ACHOST_DATA/docker" "$ACHOST_DATA/containerd/root" 2>/dev/null || true
 """

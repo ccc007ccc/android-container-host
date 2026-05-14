@@ -11,7 +11,7 @@ ACHost 的目标是成为通用的 Android container host 支持层：不把 Doc
 1. **内核能力足够**：namespace、cgroup、overlayfs、bridge/veth、netfilter/iptables 等能力必须存在并能工作。
 2. **Android root 环境允许运行守护进程**：KernelSU/ReSukiSU/Magisk 等环境需要允许模块安装二进制、创建持久目录、启动 daemon、挂载 cgroup 和创建 Unix socket。
 3. **Android 系统服务不持续破坏容器状态**：netd、lmkd、SELinux、VPN/Wi-Fi 策略可能影响网络、进程存活和文件访问。
-4. **用户态资产匹配**：Docker、containerd、runc、可选 compose/buildx/buildkit 必须是 Android/arm64 可执行文件，并且依赖尽量静态或自带。
+4. **用户态资产匹配**：Docker、containerd、runc、可选 compose/buildx/buildkit，以及 LXC userland/rootfs 必须是 Android/arm64 可执行文件或归档，并且依赖尽量静态或自带。
 
 ACHost 负责检测、打包、运行和验证这些条件；它不能凭空补齐一个缺失严重的内核。
 
@@ -46,7 +46,7 @@ profiles/docker-bridge-overlay2.yml
 - docker0 bridge、veth、IPv4 NAT/MASQUERADE、policy rule reconcile。
 - WebUI API status/list containers/list images。
 - local Docker smoke，不依赖 Docker Hub。
-- split module boundary：base/docker/lxc 不混包。
+- split module boundary：base/docker/lxc 不混包，Ubuntu rootfs 通过设备路径导入，SHA-256 可选。
 
 这说明项目在该设备上完成 Docker native 主链路，但不代表其它机型可以跳过内核验证。
 
@@ -186,6 +186,23 @@ buildkitd
 
 `docker-proxy` 影响 `-p 127.0.0.1:host:container` 这类发布端口场景。Compose/buildx/BuildKit 不影响 Docker daemon 启动。
 
+LXC 基础模块需要 Android/arm64 可执行的 LXC userland，例如：
+
+```text
+lxc-start
+lxc-stop
+lxc-attach
+lxc-info
+lxc-ls
+lxc-destroy
+lxc-execute
+lxc-checkconfig
+```
+
+Ubuntu 26.04 LXC 模块只需要 rootfs tar/tar.gz asset。它不是 runtime 模块，不携带 LXC 二进制、通用配置或 WebUI。
+
+LXC 容器内管理能力由基础 `achost-lxc` 提供：系统状态需要容器能通过 `lxc-attach` 运行 `/bin/sh`；密码修改由 runtime 直接更新容器 rootfs 的 `/etc/shadow` SHA-512 hash，不依赖容器内 `chpasswd`；生命周期、自启、强制停止和日志读取都由基础 LXC runtime/API 固定动作提供。安装/升级 LXC 模块时会在 `/data/adb/ksu/bin` 暴露 ACHost 管理的 `lxc*`/`lxd*` wrapper；这些 wrapper 依赖模块内 LXC userland 和当前设备 root 环境。
+
 ## 新机型适配流程
 
 ### 1. 新建设备 metadata
@@ -260,7 +277,7 @@ Moby check-config 是 Linux Docker 参考检查，不理解 Android 的全部差
 
 ### 4. 生成模块并安装
 
-先生成 split 包，先装 base，再装 docker。
+先生成 split 包。Docker 路径安装 base + docker；LXC 路径安装 base + lxc。Ubuntu rootfs 不再是模块，使用设备路径上的已验证 tarball 导入。
 
 ```bash
 PYTHONPATH=$PWD python3 -m achost.cli runtime-install \
@@ -278,12 +295,29 @@ PYTHONPATH=$PWD python3 -m achost.cli runtime-install \
   --docker-sha256 <sha256> \
   --output out/achost-docker \
   --zip out/achost-docker.zip
+
+PYTHONPATH=$PWD python3 -m achost.cli runtime-install \
+  --mode kernelsu-module \
+  --module-target lxc \
+  --cgroup-mode v1 \
+  --lxc-asset /path/to/lxc-userland-aarch64.tar.gz \
+  --lxc-sha256 <sha256> \
+  --output out/achost-lxc \
+  --zip out/achost-lxc.zip
 ```
 
 ### 5. 跑设备验证
 
 ```sh
 su -c 'MODE=docker OUT_DIR=/data/local/tmp/achost-runtime-test /data/adb/modules/achost-base/achost/bin/runtime-test.sh'
+su -c 'MODE=lxc OUT_DIR=/data/local/tmp/achost-runtime-test /data/adb/modules/achost-base/achost/bin/runtime-test.sh'
+```
+
+如果要验证 Ubuntu LXC 容器启动，先把 rootfs 放到设备路径，再提供 rootfs asset；`ROOTFS_SHA256` 可选，设置时会先校验：
+
+```sh
+adb push ubuntu-26.04-arm64-rootfs.tar.gz /data/local/tmp/ubuntu-26.04-arm64-rootfs.tar.gz
+su -c 'ROOTFS_ASSET=/data/local/tmp/ubuntu-26.04-arm64-rootfs.tar.gz ROOTFS_SHA256=<sha256> MODE=lxc OUT_DIR=/data/local/tmp/achost-runtime-test /data/adb/modules/achost-base/achost/bin/runtime-test.sh'
 ```
 
 最少应确认：
@@ -295,6 +329,9 @@ Docker daemon start OK
 container network reconcile OK
 Docker runtime smoke OK
 Docker daemon stop OK
+LXC host validation OK
+LXC asset validation OK
+LXC prepare bridge OK
 ```
 
 手动补充检查：
@@ -302,7 +339,9 @@ Docker daemon stop OK
 ```sh
 su -c '/data/adb/modules/achost-docker/achost/bin/docker --host unix:///data/adb/achost/run/docker.sock version'
 su -c '/data/adb/modules/achost-docker/achost/bin/ctr --address /data/adb/achost/run/containerd.sock version'
-su -c '/data/adb/modules/achost-docker/achost/bin/achost-webui-api status'
+su -c '/data/adb/modules/achost-docker/achost/bin/achost-webui-api.sh status'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-lxc-runtime list --json'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-webui-api.sh lxc-status'
 ```
 
 ## 结果分级
@@ -318,6 +357,14 @@ su -c '/data/adb/modules/achost-docker/achost/bin/achost-webui-api status'
 - local smoke 通过。
 - `net-reconcile` 成功。
 - stop 后无 dockerd/containerd 残留。
+
+可以认为设备支持 LXC 基础模块的条件：
+
+- LXC host validation 通过。
+- LXC asset validation 通过。
+- `prepare-bridge` 能创建或修复 `lxcbr0`。
+- `achost-lxc-runtime list --json` 能读取受控容器目录。
+- 如果声明支持 Ubuntu LXC，必须额外验证 rootfs import、start、exec、logs、stop。
 
 ### 部分支持
 

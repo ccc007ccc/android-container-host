@@ -79,10 +79,20 @@ binary_status buildctl 0
 binary_status buildkitd 0
 
 section "lxc binaries"
-if [ -x "$ACHOST_BIN/achost-lxc-validate.sh" ]; then
-    "$ACHOST_BIN/achost-lxc-validate.sh"
+if [ -x "$ACHOST_BIN/achost-lxc-runtime" ] || [ -x "$ACHOST_BIN/achost-lxc-validate.sh" ]; then
+    LXC_ROOT="$ACHOST"
+    LXC_BIN="$ACHOST_BIN"
 else
-    printf 'achost-lxc-validate.sh=missing\n'
+    LXC_ROOT="${ACHOST_LXC_MODULE:-$ACHOST}"
+    LXC_BIN="$LXC_ROOT/bin"
+fi
+LXC_ENV="ACHOST=$LXC_ROOT ACHOST_BIN=$LXC_BIN ACHOST_ETC=$LXC_ROOT/etc ACHOST_LXC_MODULE=$LXC_ROOT ACHOST_LXC=$LXC_ROOT/lxc ACHOST_LXC_BIN=$LXC_ROOT/lxc/bin ACHOST_LXC_ETC=$LXC_ROOT/etc/lxc"
+if [ -x "$LXC_BIN/achost-lxc-runtime" ]; then
+    env $LXC_ENV "$LXC_BIN/achost-lxc-runtime" validate-assets
+elif [ -x "$LXC_BIN/achost-lxc-validate.sh" ]; then
+    env $LXC_ENV "$LXC_BIN/achost-lxc-validate.sh"
+else
+    printf 'achost-lxc-runtime=missing\n'
 fi
 
 section "docker sockets"

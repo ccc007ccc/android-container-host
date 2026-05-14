@@ -3,10 +3,12 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+
+const LINUX_GUEST_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 #[derive(Clone, Debug)]
 struct RuntimeEnv {
@@ -34,6 +36,11 @@ struct RuntimeEnv {
     return_rule_priority: String,
     source_rule_priority: String,
     base_present: bool,
+    module_target: String,
+    lxc_runtime: PathBuf,
+    lxc_containers: PathBuf,
+    lxc_bridge: String,
+    lxc_subnet: String,
 }
 
 #[derive(Debug)]
@@ -83,6 +90,8 @@ impl RuntimeEnv {
         let common = env_path("ACHOST_COMMON").unwrap_or_else(|| achost.clone());
         let common_bin = env_path("ACHOST_COMMON_BIN").unwrap_or_else(|| common.join("bin"));
         let use_chroot = env::var("ACHOST_USE_CHROOT").unwrap_or_else(|_| "0".to_string());
+        let lxc_var =
+            env_path("ACHOST_LXC_VAR").unwrap_or_else(|| PathBuf::from("/data/adb/achost/lxc"));
         Self {
             dockerd_pid: env_path("ACHOST_DOCKERD_PID").unwrap_or_else(|| run.join("dockerd.pid")),
             containerd_pid: env_path("ACHOST_CONTAINERD_PID")
@@ -116,6 +125,13 @@ impl RuntimeEnv {
             base_present: env::var("ACHOST_BASE_ENV_PRESENT")
                 .map(|value| value == "1")
                 .unwrap_or(false),
+            module_target: env::var("ACHOST_MODULE_TARGET").unwrap_or_default(),
+            lxc_runtime: env_path("ACHOST_LXC_RUNTIME")
+                .unwrap_or_else(|| bin.join("achost-lxc-runtime")),
+            lxc_containers: env_path("ACHOST_LXC_CONTAINERS")
+                .unwrap_or_else(|| lxc_var.join("containers")),
+            lxc_bridge: env::var("LXC_BRIDGE").unwrap_or_else(|_| "lxcbr0".to_string()),
+            lxc_subnet: env::var("LXC_SUBNET").unwrap_or_else(|_| "172.32.0.0/16".to_string()),
             achost,
             bin,
             var,
@@ -163,6 +179,7 @@ fn main() {
 
 fn dispatch(env: &RuntimeEnv, args: &[String]) -> Value {
     match args.first().map(String::as_str) {
+        Some("status") if env.module_target == "lxc" => lxc_status_json(env),
         Some("status") => status_json(env),
         Some("settings") => settings_json(env),
         Some("set-autostart") => set_autostart(env, args.get(1).map(String::as_str).unwrap_or("")),
@@ -221,6 +238,63 @@ fn dispatch(env: &RuntimeEnv, args: &[String]) -> Value {
         Some("pull-image") => pull_image(env, args.get(1).map(String::as_str).unwrap_or("")),
         Some("remove-image") => remove_image(env, args.get(1).map(String::as_str).unwrap_or("")),
         Some("daemon-logs") => daemon_logs(env),
+        Some("lxc-status") => lxc_status_json(env),
+        Some("lxc-list") => lxc_list(env),
+        Some("lxc-start") => lxc_target_action(
+            env,
+            "lxc-start",
+            "start",
+            args.get(1).map(String::as_str).unwrap_or(""),
+        ),
+        Some("lxc-stop") => lxc_target_action(
+            env,
+            "lxc-stop",
+            "stop",
+            args.get(1).map(String::as_str).unwrap_or(""),
+        ),
+        Some("lxc-force-stop") => {
+            lxc_force_stop(env, args.get(1).map(String::as_str).unwrap_or(""))
+        }
+        Some("lxc-destroy") => lxc_target_action(
+            env,
+            "lxc-destroy",
+            "destroy",
+            args.get(1).map(String::as_str).unwrap_or(""),
+        ),
+        Some("lxc-set-autostart") => lxc_set_autostart(
+            env,
+            args.get(1).map(String::as_str).unwrap_or(""),
+            args.get(2).map(String::as_str).unwrap_or(""),
+        ),
+        Some("lxc-system-status") => {
+            lxc_system_status(env, args.get(1).map(String::as_str).unwrap_or(""))
+        }
+        Some("lxc-generate-password") => lxc_generate_password(
+            env,
+            args.get(1).map(String::as_str).unwrap_or(""),
+            args.get(2).map(String::as_str).unwrap_or(""),
+        ),
+        Some("lxc-set-password") => lxc_set_password(
+            env,
+            args.get(1).map(String::as_str).unwrap_or(""),
+            args.get(2).map(String::as_str).unwrap_or(""),
+        ),
+        Some("lxc-logs") => lxc_logs(env, args.get(1).map(String::as_str).unwrap_or("")),
+        Some("lxc-exec") => lxc_exec(
+            env,
+            args.get(1).map(String::as_str).unwrap_or(""),
+            args.get(2).map(String::as_str).unwrap_or(""),
+        ),
+        Some("lxc-import-rootfs") => lxc_import_rootfs(
+            env,
+            args.get(1).map(String::as_str).unwrap_or(""),
+            args.get(2).map(String::as_str).unwrap_or(""),
+            args.get(3).map(String::as_str).unwrap_or("unknown"),
+            args.get(4).map(String::as_str).unwrap_or("unknown"),
+            args.get(5).map(String::as_str).unwrap_or("unknown"),
+            args.get(6).map(String::as_str).unwrap_or(""),
+        ),
+        Some("lxc-check") => lxc_check(env),
         _ => error_json("unsupported command"),
     }
 }
@@ -248,6 +322,51 @@ fn run_program(program: &Path, args: &[String]) -> CommandResult {
                 ok: output.status.success(),
                 rc,
                 output: trim_trailing_newlines(text),
+            }
+        }
+        Err(error) => CommandResult {
+            ok: false,
+            rc: 1,
+            output: error.to_string(),
+        },
+    }
+}
+
+fn run_program_with_input(program: &Path, args: &[String], input: &str) -> CommandResult {
+    match Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(mut child) => {
+            if let Some(stdin) = child.stdin.as_mut() {
+                if let Err(error) = stdin.write_all(input.as_bytes()) {
+                    return CommandResult {
+                        ok: false,
+                        rc: 1,
+                        output: error.to_string(),
+                    };
+                }
+            }
+            match child.wait_with_output() {
+                Ok(output) => {
+                    let rc = output.status.code().unwrap_or(1);
+                    let mut text = String::new();
+                    text.push_str(&String::from_utf8_lossy(&output.stdout));
+                    text.push_str(&String::from_utf8_lossy(&output.stderr));
+                    CommandResult {
+                        ok: output.status.success(),
+                        rc,
+                        output: trim_trailing_newlines(text),
+                    }
+                }
+                Err(error) => CommandResult {
+                    ok: false,
+                    rc: 1,
+                    output: error.to_string(),
+                },
             }
         }
         Err(error) => CommandResult {
@@ -587,6 +706,321 @@ fn check_json(env: &RuntimeEnv) -> Value {
     json!({"ok": rc == 0, "rc": rc, "output": output})
 }
 
+fn lxc_status_json(env: &RuntimeEnv) -> Value {
+    let list = lxc_list(env);
+    let containers = list
+        .get("containers")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let running = containers
+        .iter()
+        .filter(|item| item.get("state").and_then(Value::as_str) == Some("RUNNING"))
+        .count();
+    json!({
+        "ok": list.get("ok").and_then(Value::as_bool).unwrap_or(false),
+        "runtime": "lxc",
+        "module_target": env.module_target,
+        "base_present": env.base_present,
+        "data_root": path_string(&env.var),
+        "lxc_runtime": path_string(&env.lxc_runtime),
+        "lxc_containers": path_string(&env.lxc_containers),
+        "bridge": env.lxc_bridge,
+        "bridge_subnet": env.lxc_subnet,
+        "containers_total": containers.len(),
+        "containers_running": running,
+        "containers_stopped": containers.len().saturating_sub(running),
+        "containers": containers,
+        "error": list.get("error").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn lxc_list(env: &RuntimeEnv) -> Value {
+    run_lxc_json(env, &["list".to_string(), "--json".to_string()])
+}
+
+fn lxc_target_action(env: &RuntimeEnv, label: &str, command: &str, target: &str) -> Value {
+    if !valid_name(target) {
+        return error_json("invalid LXC container name");
+    }
+    run_and_report(
+        label,
+        &env.lxc_runtime,
+        &[command.to_string(), target.to_string()],
+    )
+}
+
+fn lxc_force_stop(env: &RuntimeEnv, target: &str) -> Value {
+    if !valid_name(target) {
+        return error_json("invalid LXC container name");
+    }
+    run_and_report(
+        "lxc-force-stop",
+        &env.lxc_runtime,
+        &[
+            "stop".to_string(),
+            target.to_string(),
+            "--force".to_string(),
+        ],
+    )
+}
+
+fn lxc_logs(env: &RuntimeEnv, target: &str) -> Value {
+    if !valid_name(target) {
+        return error_json("invalid LXC container name");
+    }
+    run_and_report(
+        "lxc-logs",
+        &env.lxc_runtime,
+        &[
+            "logs".to_string(),
+            target.to_string(),
+            "--lines".to_string(),
+            "200".to_string(),
+        ],
+    )
+}
+
+fn lxc_set_autostart(env: &RuntimeEnv, target: &str, value: &str) -> Value {
+    if !valid_name(target) {
+        return error_json("invalid LXC container name");
+    }
+    if !matches!(value, "on" | "off") {
+        return error_json("invalid LXC autostart value");
+    }
+    run_and_report(
+        "lxc-set-autostart",
+        &env.lxc_runtime,
+        &[
+            "set-autostart".to_string(),
+            target.to_string(),
+            value.to_string(),
+        ],
+    )
+}
+
+fn lxc_system_status(env: &RuntimeEnv, target: &str) -> Value {
+    if !valid_name(target) {
+        return error_json("invalid LXC container name");
+    }
+    run_lxc_json(
+        env,
+        &[
+            "system-status".to_string(),
+            target.to_string(),
+            "--json".to_string(),
+        ],
+    )
+}
+
+fn lxc_generate_password(env: &RuntimeEnv, target: &str, user: &str) -> Value {
+    if !valid_name(target) {
+        return error_json("invalid LXC container name");
+    }
+    if !valid_linux_user(user) {
+        return error_json("invalid Linux user");
+    }
+    run_lxc_json(
+        env,
+        &[
+            "generate-password".to_string(),
+            target.to_string(),
+            "--user".to_string(),
+            user.to_string(),
+            "--json".to_string(),
+        ],
+    )
+}
+
+fn lxc_set_password(env: &RuntimeEnv, target: &str, user: &str) -> Value {
+    if !valid_name(target) {
+        return error_json("invalid LXC container name");
+    }
+    if !valid_linux_user(user) {
+        return error_json("invalid Linux user");
+    }
+    let password = std::env::var("ACHOST_LXC_PASSWORD").unwrap_or_default();
+    std::env::remove_var("ACHOST_LXC_PASSWORD");
+    if !valid_password_value(&password) {
+        return error_json("invalid or empty password");
+    }
+    set_lxc_password_with_value(env, target, user, &password)
+}
+
+fn set_lxc_password_with_value(
+    env: &RuntimeEnv,
+    target: &str,
+    user: &str,
+    password: &str,
+) -> Value {
+    let input = format!("{password}\n");
+    run_lxc_json_with_input(
+        env,
+        &[
+            "set-password".to_string(),
+            target.to_string(),
+            "--user".to_string(),
+            user.to_string(),
+            "--stdin".to_string(),
+            "--json".to_string(),
+        ],
+        &input,
+    )
+}
+
+fn lxc_exec(env: &RuntimeEnv, target: &str, command: &str) -> Value {
+    if !valid_name(target) {
+        return error_json("invalid LXC container name");
+    }
+    if command.trim().is_empty() {
+        return error_json("empty LXC exec command");
+    }
+    run_and_report(
+        "lxc-exec",
+        &env.lxc_runtime,
+        &[
+            "exec".to_string(),
+            target.to_string(),
+            "--".to_string(),
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!("PATH={LINUX_GUEST_PATH}; export PATH; {command}"),
+        ],
+    )
+}
+
+fn lxc_import_rootfs(
+    env: &RuntimeEnv,
+    name: &str,
+    rootfs: &str,
+    distro: &str,
+    release: &str,
+    arch: &str,
+    sha256: &str,
+) -> Value {
+    if !valid_name(name) {
+        return error_json("invalid LXC container name");
+    }
+    if !valid_android_path(rootfs) {
+        return error_json("invalid rootfs path");
+    }
+    if !sha256.is_empty() && !valid_sha256(sha256) {
+        return error_json("invalid rootfs sha256");
+    }
+    let mut args = vec![
+        "import-rootfs".to_string(),
+        "--name".to_string(),
+        name.to_string(),
+        "--rootfs-asset".to_string(),
+        rootfs.to_string(),
+        "--distro".to_string(),
+        safe_label(distro),
+        "--release".to_string(),
+        safe_label(release),
+        "--arch".to_string(),
+        safe_label(arch),
+    ];
+    if !sha256.is_empty() {
+        args.push("--sha256".to_string());
+        args.push(sha256.to_ascii_lowercase());
+    }
+    run_and_report("lxc-import-rootfs", &env.lxc_runtime, &args)
+}
+
+fn lxc_check(env: &RuntimeEnv) -> Value {
+    let mut ok = true;
+    let mut output = String::new();
+    for command in [
+        "write-configs",
+        "validate-host",
+        "validate-assets",
+        "prepare-bridge",
+    ] {
+        let result = run_program(&env.lxc_runtime, &[command.to_string()]);
+        if !result.ok {
+            ok = false;
+        }
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&format!(
+            "$ achost-lxc-runtime {command}\n{}",
+            result.output
+        ));
+    }
+    json!({"ok": ok, "action": "lxc-check", "output": output})
+}
+
+fn run_lxc_json(env: &RuntimeEnv, args: &[String]) -> Value {
+    parse_lxc_json_result(run_program(&env.lxc_runtime, args))
+}
+
+fn run_lxc_json_with_input(env: &RuntimeEnv, args: &[String], input: &str) -> Value {
+    parse_lxc_json_result(run_program_with_input(&env.lxc_runtime, args, input))
+}
+
+fn parse_lxc_json_result(result: CommandResult) -> Value {
+    match serde_json::from_str::<Value>(&result.output) {
+        Ok(mut value) => {
+            if !result.ok {
+                if let Some(object) = value.as_object_mut() {
+                    object
+                        .entry("ok".to_string())
+                        .or_insert_with(|| json!(false));
+                    object.insert("rc".to_string(), json!(result.rc));
+                } else {
+                    value = json!({"ok": false, "rc": result.rc, "result": value});
+                }
+            }
+            value
+        }
+        Err(_) => {
+            if result.ok {
+                json!({"ok": false, "error": result.output})
+            } else {
+                json!({"ok": false, "rc": result.rc, "error": result.output})
+            }
+        }
+    }
+}
+
+fn valid_android_path(value: &str) -> bool {
+    value.starts_with('/')
+        && !value
+            .bytes()
+            .any(|byte| byte == 0 || byte.is_ascii_control())
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn safe_label(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+        .collect::<String>()
+}
+
+fn valid_linux_user(value: &str) -> bool {
+    if value.is_empty() || value.len() > 64 {
+        return false;
+    }
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+}
+
+fn valid_password_value(value: &str) -> bool {
+    !value.is_empty()
+        && !value.bytes().any(|byte| {
+            byte == b':' || byte == 0 || byte == b'\n' || byte == b'\r' || byte.is_ascii_control()
+        })
+}
+
 fn list_containers(env: &RuntimeEnv) -> Value {
     if !env.docker.exists() {
         return error_json("docker binary not found");
@@ -826,6 +1260,9 @@ fn tail_lines(path: &Path, count: usize) -> String {
 
 fn valid_name(value: &str) -> bool {
     !value.is_empty()
+        && value != "."
+        && value != ".."
+        && !value.contains("..")
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
@@ -914,6 +1351,7 @@ fn normalize_mount_item(env: &RuntimeEnv, item: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn test_env() -> RuntimeEnv {
         RuntimeEnv {
@@ -941,6 +1379,13 @@ mod tests {
             return_rule_priority: "11999".to_string(),
             source_rule_priority: "12000".to_string(),
             base_present: true,
+            module_target: "docker".to_string(),
+            lxc_runtime: PathBuf::from(
+                "/data/adb/modules/achost-lxc/achost/bin/achost-lxc-runtime",
+            ),
+            lxc_containers: PathBuf::from("/data/adb/achost/lxc/containers"),
+            lxc_bridge: "lxcbr0".to_string(),
+            lxc_subnet: "172.32.0.0/16".to_string(),
         }
     }
 
@@ -959,6 +1404,70 @@ mod tests {
         assert!(!valid_env_item("1KEY=value"));
         assert!(valid_mount_item("/data/www:/usr/share/nginx/html"));
         assert!(!valid_mount_item("relative:/container"));
+        assert!(valid_sha256(
+            "abcdefabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123"
+        ));
+        assert!(!valid_sha256("not-a-sha"));
+    }
+
+    #[test]
+    fn keeps_structured_lxc_json_on_nonzero_exit() {
+        let value = parse_lxc_json_result(CommandResult {
+            ok: false,
+            rc: 7,
+            output: r#"{"ok":false,"steps":[{"name":"install","ok":false}],"error":"apt failed"}"#
+                .to_string(),
+        });
+
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["rc"], 7);
+        assert_eq!(value["error"], "apt failed");
+        assert_eq!(value["steps"][0]["name"], "install");
+    }
+
+    #[test]
+    fn lxc_import_rootfs_forwards_sha256() {
+        let dir = env::temp_dir().join(format!("achost-api-import-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let runtime = dir.join("achost-lxc-runtime");
+        fs::write(
+            &runtime,
+            r#"#!/usr/bin/env sh
+printf '%s\n' "$*"
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut env_config = test_env();
+        env_config.lxc_runtime = runtime;
+
+        let value = lxc_import_rootfs(
+            &env_config,
+            "ubuntu-26.04",
+            "/data/local/tmp/ubuntu-rootfs.tar.gz",
+            "ubuntu",
+            "26.04",
+            "arm64",
+            "ABCDEFabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123",
+        );
+
+        assert_eq!(value["ok"], true);
+        let output = value["output"].as_str().unwrap();
+        assert!(output
+            .contains("--sha256 abcdefabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123"));
+        let invalid = lxc_import_rootfs(
+            &env_config,
+            "ubuntu-26.04",
+            "/data/local/tmp/ubuntu-rootfs.tar.gz",
+            "ubuntu",
+            "26.04",
+            "arm64",
+            "not-a-sha",
+        );
+        assert_eq!(invalid["ok"], false);
+        assert_eq!(invalid["error"], "invalid rootfs sha256");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

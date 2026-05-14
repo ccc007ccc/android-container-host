@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vite build"
+    "build": "rm -rf dist && npm run build:docker && npm run build:lxc",
+    "build:docker": "ACHOST_WEBUI_TARGET=docker vite build",
+    "build:lxc": "ACHOST_WEBUI_TARGET=lxc vite build"
   },
   "dependencies": {
     "kernelsu": "3.0.2"

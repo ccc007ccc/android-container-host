@@ -6,6 +6,7 @@ from typing import Any
 DEFAULT_PACKAGE_ROOT = "/data/adb/achost"
 DEFAULT_OUT_DIR = "/data/local/tmp/achost-runtime-test"
 SUPPORTED_TARGETS = ("all", "network", "docker", "lxc")
+LXC_ROOTFS_NOTE = "Set ROOTFS_ASSET to a tar/tar.gz rootfs to run LXC import/start/smoke; without it runtime-smoke-lxc skips container boot."
 
 STEPS = {
     "network": ("runtime-net-debug", "collect-logs"),
@@ -19,7 +20,14 @@ STEPS = {
         "achost-docker-runtime stop",
         "collect-logs",
     ),
-    "lxc": ("verify-lxc-checkconfig", "runtime-smoke-lxc", "collect-logs"),
+    "lxc": (
+        "achost-lxc-runtime write-configs",
+        "achost-lxc-runtime validate-host",
+        "achost-lxc-runtime validate-assets",
+        "achost-lxc-runtime prepare-bridge",
+        "runtime-smoke-lxc",
+        "collect-logs",
+    ),
     "all": (
         "runtime-net-debug",
         "achost-runtime-core protect-daemons",
@@ -28,7 +36,10 @@ STEPS = {
         "runtime-smoke-docker",
         "runtime-docker-feature-test",
         "achost-docker-runtime stop",
-        "verify-lxc-checkconfig",
+        "achost-lxc-runtime write-configs",
+        "achost-lxc-runtime validate-host",
+        "achost-lxc-runtime validate-assets",
+        "achost-lxc-runtime prepare-bridge",
         "runtime-smoke-lxc",
         "collect-logs",
     ),
@@ -56,6 +67,10 @@ def build_runtime_test_report(
             shlex.quote(script),
         )
     )
+    notes = []
+    if target in ("all", "lxc"):
+        notes.append(LXC_ROOTFS_NOTE)
+
     return {
         "target": target,
         "package_root": root,
@@ -63,6 +78,7 @@ def build_runtime_test_report(
         "script": script,
         "command": command,
         "steps": list(STEPS[target]),
+        "notes": notes,
     }
 
 
@@ -76,4 +92,8 @@ def format_runtime_test_report(report: dict[str, Any]) -> str:
         "steps:",
     ]
     lines.extend(f"  - {step}" for step in report["steps"])
+    notes = report.get("notes") or []
+    if notes:
+        lines.append("notes:")
+        lines.extend(f"  - {note}" for note in notes)
     return "\n".join(lines)

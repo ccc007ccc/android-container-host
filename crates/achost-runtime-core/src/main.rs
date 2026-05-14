@@ -47,7 +47,8 @@ impl RuntimeConfig {
             .unwrap_or_else(|| "docker0".to_string());
         Self {
             bridge,
-            docker_subnet: env_nonempty("DOCKER_SUBNET"),
+            docker_subnet: env_nonempty("CONTAINER_SUBNET")
+                .or_else(|| env_nonempty("DOCKER_SUBNET")),
             uplink: env_nonempty("UPLINK"),
             target: env_nonempty("TARGET").unwrap_or_else(|| "1.1.1.1".to_string()),
             iptables: env_nonempty("IPTABLES"),
@@ -82,6 +83,13 @@ impl WatchdogConfig {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct BridgeReconcileArgs {
+    bridge: Option<String>,
+    subnet: Option<String>,
+    owner: String,
+}
+
 #[derive(Clone, Copy)]
 enum Logger<'a> {
     Stdout,
@@ -102,6 +110,7 @@ fn main() {
     let code = match args.get(1).map(String::as_str) {
         Some("detect-uplink") => run_detect_uplink(&args[2..]),
         Some("net-reconcile") => run_net_reconcile(),
+        Some("bridge-reconcile") => run_bridge_reconcile(&args[2..]),
         Some("net-watchdog") => run_net_watchdog(),
         Some("protect-daemons") => run_protect_daemons(),
         Some(command) => {
@@ -109,11 +118,34 @@ fn main() {
             2
         }
         None => {
-            eprintln!("usage: achost-runtime-core <detect-uplink|net-reconcile|net-watchdog|protect-daemons>");
+            eprintln!("usage: achost-runtime-core <detect-uplink|net-reconcile|bridge-reconcile|net-watchdog|protect-daemons>");
             2
         }
     };
     std::process::exit(code);
+}
+
+fn parse_bridge_reconcile_args(args: &[String]) -> Result<BridgeReconcileArgs, String> {
+    let mut parsed = BridgeReconcileArgs {
+        bridge: None,
+        subnet: None,
+        owner: "container".to_string(),
+    };
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].as_str();
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| format!("missing value for {flag}"))?;
+        match flag {
+            "--bridge" => parsed.bridge = Some(value.clone()),
+            "--subnet" => parsed.subnet = Some(value.clone()),
+            "--owner" => parsed.owner = value.clone(),
+            _ => return Err(format!("unsupported bridge-reconcile argument: {flag}")),
+        }
+        index += 2;
+    }
+    Ok(parsed)
 }
 
 fn run_detect_uplink(args: &[String]) -> i32 {
@@ -140,6 +172,39 @@ fn run_net_reconcile() -> i32 {
     }
 }
 
+fn run_bridge_reconcile(args: &[String]) -> i32 {
+    let bridge_args = match parse_bridge_reconcile_args(args) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return 2;
+        }
+    };
+    let mut config = RuntimeConfig::from_env();
+    if let Some(bridge) = bridge_args.bridge {
+        config.bridge = bridge;
+    }
+    if let Some(subnet) = bridge_args.subnet {
+        config.docker_subnet = Some(subnet);
+    }
+    println!("bridge_owner={}", bridge_args.owner);
+    if let Some(subnet) = config.docker_subnet.as_deref() {
+        if let Err(error) =
+            ensure_bridge_ready(&config.bridge, subnet, config.dry_run, Logger::Stdout)
+        {
+            eprintln!("error: {}", error.message);
+            return error.code;
+        }
+    }
+    match net_reconcile(&config, Logger::Stdout) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("error: {}", error.message);
+            error.code
+        }
+    }
+}
+
 fn run_net_watchdog() -> i32 {
     match net_watchdog(WatchdogConfig::from_env()) {
         Ok(()) => 0,
@@ -155,6 +220,63 @@ fn run_protect_daemons() -> i32 {
     0
 }
 
+fn ensure_bridge_ready(
+    bridge: &str,
+    subnet: &str,
+    dry_run: bool,
+    logger: Logger<'_>,
+) -> Result<(), RuntimeError> {
+    if !have_command("ip") {
+        return Err(RuntimeError::new(1, "ip command not found"));
+    }
+    if !command_success_silent("ip", &["link", "show", bridge]) {
+        let args = vec![
+            "link".to_string(),
+            "add".to_string(),
+            "name".to_string(),
+            bridge.to_string(),
+            "type".to_string(),
+            "bridge".to_string(),
+        ];
+        if !run_logged(logger, "ip", &args, dry_run)
+            && !command_success_silent("ip", &["link", "show", bridge])
+        {
+            return Err(RuntimeError::new(
+                1,
+                format!("failed to create bridge {bridge}"),
+            ));
+        }
+    }
+    let gateway = bridge_gateway_cidr(subnet)
+        .ok_or_else(|| RuntimeError::new(1, format!("invalid bridge subnet: {subnet}")))?;
+    let addr_args = vec![
+        "addr".to_string(),
+        "replace".to_string(),
+        gateway,
+        "dev".to_string(),
+        bridge.to_string(),
+    ];
+    if !run_logged(logger, "ip", &addr_args, dry_run) {
+        return Err(RuntimeError::new(
+            1,
+            format!("failed to assign address to {bridge}"),
+        ));
+    }
+    let up_args = vec![
+        "link".to_string(),
+        "set".to_string(),
+        bridge.to_string(),
+        "up".to_string(),
+    ];
+    if !run_logged(logger, "ip", &up_args, dry_run) {
+        return Err(RuntimeError::new(
+            1,
+            format!("failed to bring up bridge {bridge}"),
+        ));
+    }
+    Ok(())
+}
+
 fn net_reconcile(config: &RuntimeConfig, logger: Logger<'_>) -> Result<(), RuntimeError> {
     if !have_command("ip") {
         return Err(RuntimeError::new(1, "ip command not found"));
@@ -168,13 +290,14 @@ fn net_reconcile(config: &RuntimeConfig, logger: Logger<'_>) -> Result<(), Runti
         RuntimeError::new(
             1,
             format!(
-                "cannot determine IPv4 subnet for {}; set DOCKER_SUBNET",
+                "cannot determine IPv4 subnet for {}; set CONTAINER_SUBNET or DOCKER_SUBNET",
                 config.bridge
             ),
         )
     })?;
 
     logger.line(format!("container_bridge={}", config.bridge));
+    logger.line(format!("container_subnet={subnet}"));
     logger.line(format!("docker_bridge={}", config.bridge));
     logger.line(format!("docker_subnet={subnet}"));
     logger.line(format!("iptables={iptables}"));
@@ -933,6 +1056,23 @@ fn token_after(text: &str, needle: &str) -> Option<String> {
     None
 }
 
+fn bridge_gateway_cidr(subnet: &str) -> Option<String> {
+    let (addr, prefix) = subnet.split_once('/')?;
+    let mut octets = [0_u8; 4];
+    let parts: Vec<&str> = addr.split('.').collect();
+    if parts.len() != 4 || prefix.parse::<u8>().ok()? > 32 {
+        return None;
+    }
+    for (index, part) in parts.iter().enumerate() {
+        octets[index] = part.parse().ok()?;
+    }
+    octets[3] = 1;
+    Some(format!(
+        "{}.{}.{}.{}/{}",
+        octets[0], octets[1], octets[2], octets[3], prefix
+    ))
+}
+
 fn looks_like_ipv4_cidr(value: &str) -> bool {
     value.contains('/')
         && value
@@ -1031,6 +1171,36 @@ mod tests {
         assert!(looks_like_ipv4_cidr("172.31.0.0/16"));
         assert!(!looks_like_ipv4_cidr("default"));
         assert!(!looks_like_ipv4_cidr("fe80::/64"));
+    }
+
+    #[test]
+    fn derives_bridge_gateway_from_subnet() {
+        assert_eq!(
+            bridge_gateway_cidr("172.32.0.0/16"),
+            Some("172.32.0.1/16".to_string())
+        );
+        assert_eq!(bridge_gateway_cidr("bad"), None);
+    }
+
+    #[test]
+    fn parses_bridge_reconcile_args() {
+        let args = vec![
+            "--bridge".to_string(),
+            "lxcbr0".to_string(),
+            "--subnet".to_string(),
+            "172.32.0.0/16".to_string(),
+            "--owner".to_string(),
+            "lxc".to_string(),
+        ];
+
+        assert_eq!(
+            parse_bridge_reconcile_args(&args).unwrap(),
+            BridgeReconcileArgs {
+                bridge: Some("lxcbr0".to_string()),
+                subnet: Some("172.32.0.0/16".to_string()),
+                owner: "lxc".to_string(),
+            }
+        );
     }
 
     #[test]

@@ -14,11 +14,11 @@ Docker native runtime 是当前主线，已经完成核心闭环：
 - split 模块边界已明确：
   - `achost-base`：公共 runtime、`achost-runtime-core`、`achost-supervise`。
   - `achost-docker`：Docker 引擎、`achost-docker-runtime`、WebUI API、Docker smoke/feature tests。
-  - `achost-lxc`：LXC 配置和验证入口。
-- WebUI 已支持 Docker 状态、启动/停止、容器列表/创建/启动/停止/重启/删除/日志/inspect、镜像列表/拉取/删除、daemon 日志。
+  - `achost-lxc`：通用 LXC runtime、LXC 配置、LXC userland asset、通用容器 WebUI/API 和 verified rootfs 导入。
+- WebUI 已支持 Docker 状态、启动/停止、容器列表/创建/启动/停止/重启/删除/日志/inspect、镜像列表/拉取/删除、daemon 日志；LXC 模块提供独立的通用容器面板。
 - 已在 Xiaomi lmi / sm8250 / Android 16 / Linux 4.19 vendor kernel 上验证 native Docker socket、containerd、overlay2、bridge NAT、runtime smoke 和 WebUI API。
 
-LXC 有配置槽位和验证路径，但完整 Android-compatible LXC userspace 仍处于实验阶段。qtaguid 修复和自动 patch 应用仍是后续工作。
+LXC 基础模块已经具备 Rust lifecycle CLI、通用 WebUI/API、容器自启、强制停止、容器内系统状态和通用用户密码管理；模块安装时会在 `/data/adb/ksu/bin` 暴露 ACHost 管理的 `lxc*`/`lxd*` wrapper。端到端容器启动仍取决于可用的 Android/arm64 LXC userland 与 rootfs 资产。qtaguid 修复和自动 patch 应用仍是后续工作。
 
 ## 这个项目是否通用
 
@@ -110,11 +110,13 @@ PYTHONPATH=$PWD python3 -m achost.cli runtime-install \
   --mode kernelsu-module \
   --module-target lxc \
   --cgroup-mode v1 \
+  --lxc-asset /path/to/lxc-userland-aarch64.tar.gz \
+  --lxc-sha256 <sha256> \
   --output out/achost-lxc \
   --zip out/achost-lxc.zip
 ```
 
-安装顺序建议：先刷 `achost-base.zip`，再刷 `achost-docker.zip`，需要 LXC 时再刷 `achost-lxc.zip`。
+安装顺序建议：先刷 `achost-base.zip`，再按需要刷 `achost-docker.zip` 或 `achost-lxc.zip`。Ubuntu 26.04 作为 rootfs tarball 进入导入流程，不再生成独立 `achost-lxc-ubuntu.zip`。
 
 ### 手动包
 
@@ -171,17 +173,79 @@ docker run --rm --network none <local-image> true
 
 文档入口见 [`docs/README.md`](docs/README.md)，更多运行和验证说明见 [`docs/runtime-usage.md`](docs/runtime-usage.md)。
 
-## WebUI
+## Android 设备上怎么用 LXC
 
-Docker 模块包含 WebUI 静态文件和 `achost-webui-api`。WebUI API 支持：
+`achost-lxc` 是通用 LXC 模块：
 
-```sh
-su -c '/data/adb/modules/achost-docker/achost/bin/achost-webui-api status'
-su -c '/data/adb/modules/achost-docker/achost/bin/achost-webui-api list-containers'
-su -c '/data/adb/modules/achost-docker/achost/bin/achost-webui-api list-images'
+```text
+/data/adb/modules/achost-lxc/achost          通用 LXC runtime、配置、userland、WebUI
+/data/adb/achost/lxc/containers              容器可变状态
+/data/adb/achost/log/lxc                     LXC 日志
 ```
 
-如果通过模块或外部 HTTP 服务暴露 WebUI，确保只绑定可信网络或本机端口；Docker 管理接口具备启动/删除容器和删除镜像能力，不应暴露给不可信网络。
+基础模块安装后可以直接在 root shell 使用：
+
+```sh
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-lxc-runtime write-configs'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-lxc-runtime validate-host'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-lxc-runtime validate-assets'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-lxc-runtime list --json'
+```
+
+Ubuntu 26.04 不再作为独立模块打包。先把 rootfs tarball 放到设备路径，再导入；`--sha256` 可选，提供时会先校验再导入：
+
+```sh
+adb push ubuntu-26.04-arm64-rootfs.tar.gz /data/local/tmp/ubuntu-26.04-arm64-rootfs.tar.gz
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-lxc-runtime import-rootfs --name ubuntu-26.04 --rootfs-asset /data/local/tmp/ubuntu-26.04-arm64-rootfs.tar.gz --distro ubuntu --release 26.04 --arch arm64 --sha256 <sha256>'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-lxc-runtime start ubuntu-26.04'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-lxc-runtime exec ubuntu-26.04 -- /bin/sh -c "cat /etc/os-release"'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-lxc-runtime stop ubuntu-26.04'
+```
+
+常用容器管理和密码命令也在基础 LXC runtime 中：
+
+```sh
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-lxc-runtime set-autostart ubuntu-26.04 on'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-lxc-runtime autostart'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-lxc-runtime system-status ubuntu-26.04 --json'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-lxc-runtime stop ubuntu-26.04 --force'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-lxc-runtime generate-password ubuntu-26.04 --user root --json'
+printf '%s\n' "$NEW_PASSWORD" | su -c '/data/adb/modules/achost-lxc/achost/bin/achost-lxc-runtime set-password ubuntu-26.04 --user root --stdin --json'
+```
+
+`achost-lxc` 不携带 Ubuntu rootfs。打开 `achost-lxc` 的 WebUI 管理任意 LXC 容器，包括 Ubuntu 容器；WebUI 导入页要求 rootfs 已在设备路径上，SHA-256 可留空，可选导入后启动容器。
+
+## WebUI
+
+Docker 模块和 LXC 模块各自包含独立 WebUI 静态文件，并复用同一个 Rust `achost-webui-api` 后端；base 模块不提供 WebUI host。Docker WebUI 只管理 Docker，LXC WebUI 只管理 LXC/rootfs/用户密码。
+
+Docker API 示例：
+
+```sh
+su -c '/data/adb/modules/achost-docker/achost/bin/achost-webui-api.sh status'
+su -c '/data/adb/modules/achost-docker/achost/bin/achost-webui-api.sh list-containers'
+su -c '/data/adb/modules/achost-docker/achost/bin/achost-webui-api.sh list-images'
+```
+
+LXC API 示例：
+
+```sh
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-webui-api.sh lxc-status'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-webui-api.sh lxc-list'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-webui-api.sh lxc-import-rootfs ubuntu-26.04 /data/local/tmp/ubuntu-26.04-arm64-rootfs.tar.gz ubuntu 26.04 arm64 [sha256]'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-webui-api.sh lxc-check'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-webui-api.sh lxc-start ubuntu-26.04'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-webui-api.sh lxc-stop ubuntu-26.04'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-webui-api.sh lxc-force-stop ubuntu-26.04'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-webui-api.sh lxc-set-autostart ubuntu-26.04 on'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-webui-api.sh lxc-system-status ubuntu-26.04'
+su -c '/data/adb/modules/achost-lxc/achost/bin/achost-webui-api.sh lxc-generate-password ubuntu-26.04 root'
+su -c 'ACHOST_LXC_PASSWORD="$NEW_PASSWORD" /data/adb/modules/achost-lxc/achost/bin/achost-webui-api.sh lxc-set-password ubuntu-26.04 root'
+```
+
+rootfs 导入、生命周期、自启、强制停止和通用用户密码管理都由基础 `achost-lxc` 后端/API 提供。密码管理会直接更新容器 rootfs 的 `/etc/shadow` SHA-512 hash，不依赖容器内 `chpasswd`；自定义密码会尽量通过环境变量或 stdin 传递，不把明文拼进普通命令参数或日志，但不承诺抵御 root 级观察。
+
+如果通过模块或外部 HTTP 服务暴露 WebUI，确保只绑定可信网络或本机端口；管理接口具备启动/删除容器、删除镜像、在容器内执行命令和修改容器用户密码的能力，不应暴露给不可信网络。
 
 ## 运行时验证
 
@@ -203,6 +267,20 @@ DOCKER_SMOKE_MODE=full           # 需要 registry 访问和外网镜像拉取
 
 `runtime-docker-feature-test.sh` 会测试 Docker exec、cp、bind mount、proxy env 等功能；如果没有 `/data/local/tmp/achost-dockertest-rootfs.tar`，相关 feature matrix 会 skip，不阻断基础 smoke。
 
+LXC 基础验证：
+
+```sh
+su -c 'MODE=lxc OUT_DIR=/data/local/tmp/achost-runtime-test /data/adb/modules/achost-base/achost/bin/runtime-test.sh'
+```
+
+默认只验证基础 LXC runtime、配置、userland asset 和 bridge 准备；如果要跑 import/start/exec/stop 端到端容器 smoke，显式提供 rootfs：
+
+```sh
+su -c 'ROOTFS_ASSET=/data/local/tmp/ubuntu-26.04-arm64-rootfs.tar.gz ROOTFS_SHA256=<sha256> MODE=lxc OUT_DIR=/data/local/tmp/achost-runtime-test /data/adb/modules/achost-base/achost/bin/runtime-test.sh'
+```
+
+没有 `ROOTFS_ASSET` 时，`runtime-smoke-lxc.sh` 会明确输出 skipped，不会伪装成已验证容器启动。
+
 ## 内核能力基线
 
 Docker native runtime 至少需要：
@@ -221,7 +299,7 @@ Docker native runtime 至少需要：
 - Docker native runtime 是支持路径；Docker chroot 启动路径已淘汰。
 - cgroup v2 可生成配置，但当前已验证稳定路径是 Android 16/lmi 上的 cgroup v1 布局。
 - qtaguid/container-safe patch 仍是占位风险项，不应宣称已经完整解决 Android 流量统计兼容。
-- LXC 支持还没有像 Docker native 一样完成端到端闭环。
+- LXC 基础模块已有 Rust lifecycle、WebUI/API 和通用容器内管理能力，但端到端容器启动和密码修改仍需要实际 Android/arm64 LXC userland 与 rootfs 资产配合验证。
 
 ## 开发验证清单
 
@@ -242,5 +320,6 @@ npm run build --prefix webui
 ```sh
 docker rm -f achost-nginx achost-publish-test achost-feature-life achost-feature-cp 2>/dev/null || true
 for image in $(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^achost-local-smoke:|^achost-dockertest:' 2>/dev/null || true); do docker rmi "$image" || true; done
+for name in achost-lxc-smoke achost-lxc-smoke-*; do /data/adb/modules/achost-lxc/achost/bin/achost-lxc-runtime destroy "$name" 2>/dev/null || true; done
 rm -rf /data/local/tmp/achost-runtime-test* /data/local/tmp/achost-feature-* /data/local/tmp/achost-local-rootfs*
 ```

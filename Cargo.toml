@@ -4,6 +4,7 @@ members = [
     "crates/achost-webui-api",
     "crates/achost-runtime-core",
     "crates/achost-docker-runtime",
+    "crates/achost-lxc-runtime",
 ]
 resolver = "2"
 

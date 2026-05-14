@@ -18,7 +18,12 @@ class RuntimeTestPlanTest(unittest.TestCase):
         self.assertIn("runtime-smoke-docker", report["steps"])
         self.assertIn("runtime-docker-feature-test", report["steps"])
         self.assertIn("achost-docker-runtime stop", report["steps"])
+        self.assertIn("achost-lxc-runtime write-configs", report["steps"])
+        self.assertIn("achost-lxc-runtime validate-host", report["steps"])
+        self.assertIn("achost-lxc-runtime validate-assets", report["steps"])
+        self.assertIn("achost-lxc-runtime prepare-bridge", report["steps"])
         self.assertIn("runtime-smoke-lxc", report["steps"])
+        self.assertTrue(any("ROOTFS_ASSET" in note for note in report["notes"]))
 
     def test_supports_kernelsu_module_root(self):
         report = build_runtime_test_report(
@@ -32,6 +37,7 @@ class RuntimeTestPlanTest(unittest.TestCase):
         self.assertIn("achost-runtime-core net-reconcile", report["steps"])
         self.assertIn("runtime-docker-feature-test", report["steps"])
         self.assertNotIn("runtime-smoke-lxc", report["steps"])
+        self.assertEqual(report["notes"], [])
 
     def test_rejects_relative_android_paths(self):
         with self.assertRaises(ValueError):
