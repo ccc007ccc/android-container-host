@@ -481,6 +481,8 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("用户密码", webroot_text)
             self.assertIn("lxc-force-stop", webroot_text)
             self.assertIn("lxc-set-autostart", webroot_text)
+            self.assertIn("lxc-destroy", webroot_text)
+            self.assertIn("删除", webroot_text)
             self.assertNotIn("SSH 快速安装", webroot_text)
             self.assertNotIn("lxc-ssh-quick-install", webroot_text)
             self.assertNotIn("lxc-service", webroot_text)

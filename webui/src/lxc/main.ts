@@ -458,6 +458,7 @@ function renderContainerRows(): string {
           <button type="button" class="small ghost" data-container="${escapeHtml(item.name)}" data-container-action="${autostartAction}" ${state.busy ? 'disabled' : ''}>自启${item.autostart ? '关' : '开'}</button>
           <button type="button" class="small ghost" data-container="${escapeHtml(item.name)}" data-container-action="status" ${state.busy ? 'disabled' : ''}>状态</button>
           <button type="button" class="small ghost" data-container="${escapeHtml(item.name)}" data-container-action="logs" ${state.busy ? 'disabled' : ''}>日志</button>
+          <button type="button" class="small danger" data-container="${escapeHtml(item.name)}" data-container-action="destroy" ${state.busy ? 'disabled' : ''}>删除</button>
         </div>
       </article>`;
     })
@@ -594,6 +595,10 @@ async function handleContainerAction(target: HTMLElement): Promise<void> {
   if (action === 'autostart-off') return runAction('关闭容器自启', 'lxc-set-autostart', [name, 'off']);
   if (action === 'status') return runAction('读取容器状态', 'lxc-system-status', [name], false);
   if (action === 'logs') return runAction('读取容器日志', 'lxc-logs', [name], false);
+  if (action === 'destroy') {
+    if (!window.confirm(`删除 LXC 容器 ${name}？容器 rootfs 和配置都会被删除。`)) return;
+    return runAction('删除容器', 'lxc-destroy', [name]);
+  }
 }
 
 if (app) {
