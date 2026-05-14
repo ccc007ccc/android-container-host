@@ -918,6 +918,10 @@ small {
     justify-content: flex-start;
   }
 
+  .lxc-container-card {
+    grid-template-areas: none;
+  }
+
   .top-actions button,
   .top-actions .pill {
     flex-basis: calc(50% - 0.3rem);
