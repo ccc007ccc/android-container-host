@@ -440,19 +440,21 @@ function renderContainerRows(): string {
       const primaryAction = running ? 'stop' : 'start';
       const autostartAction = item.autostart ? 'autostart-off' : 'autostart-on';
       return `<article class="entity-card lxc-container-card">
-        <div class="entity-main">
-          <strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong>
-          <small>${escapeHtml(`${item.distro} ${item.release} / ${item.arch}`)}</small>
+        <div class="lxc-card-head">
+          <div class="lxc-card-title">
+            <strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong>
+            <small>${escapeHtml(`${item.distro} ${item.release} / ${item.arch}`)}</small>
+          </div>
+          <div class="lxc-card-badges">
+            <span class="badge ${running ? 'green' : 'slate'}">${escapeHtml(item.state)}${item.pid ? ` · pid ${escapeHtml(item.pid)}` : ''}</span>
+            <span class="badge ${item.autostart ? 'green' : 'slate'}">自启 ${item.autostart ? 'on' : 'off'}</span>
+          </div>
         </div>
-        <div class="entity-meta">
-          <span title="${escapeHtml(item.rootfs)}">rootfs: ${escapeHtml(item.rootfs || '—')}</span>
-          <small title="${escapeHtml(item.config)}">config: ${escapeHtml(item.config || '—')}</small>
+        <div class="lxc-card-details">
+          <div class="lxc-card-detail"><b>rootfs</b><span title="${escapeHtml(item.rootfs)}">${escapeHtml(item.rootfs || '—')}</span></div>
+          <div class="lxc-card-detail"><b>config</b><span title="${escapeHtml(item.config)}">${escapeHtml(item.config || '—')}</span></div>
         </div>
-        <div class="entity-status">
-          <span class="badge ${running ? 'green' : 'slate'}">${escapeHtml(item.state)}${item.pid ? ` · pid ${escapeHtml(item.pid)}` : ''}</span>
-          <span class="badge ${item.autostart ? 'green' : 'slate'}">自启 ${item.autostart ? 'on' : 'off'}</span>
-        </div>
-        <div class="entity-actions">
+        <div class="lxc-card-actions">
           <button type="button" class="small" data-container="${escapeHtml(item.name)}" data-container-action="${primaryAction}" ${state.busy ? 'disabled' : ''}>${running ? '停止' : '启动'}</button>
           ${running ? `<button type="button" class="small danger" data-container="${escapeHtml(item.name)}" data-container-action="force-stop" ${state.busy ? 'disabled' : ''}>强制停止</button>` : ''}
           <button type="button" class="small ghost" data-container="${escapeHtml(item.name)}" data-container-action="${autostartAction}" ${state.busy ? 'disabled' : ''}>自启${item.autostart ? '关' : '开'}</button>
