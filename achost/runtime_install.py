@@ -69,6 +69,7 @@ LXC_REQUIRED_BINARIES = (
 LXC_OPTIONAL_BINARIES = ("lxc-create", "lxc-copy", "lxc-console")
 LXC_DOWNLOAD_TOOL_WRAPPERS = ("wget", "xz", "unxz")
 LXC_DOWNLOAD_TEMPLATE_REL = "achost/lxc/share/lxc/templates/lxc-download"
+LXC_COMMON_CONFIG_REL = "achost/lxc/share/lxc/config/common.conf"
 COMPOSE_ASSET_NAMES = ("docker-compose", "docker-compose-linux-aarch64", "docker-compose-linux-arm64")
 COMPOSE_PLUGIN_REL = "achost/etc/docker/cli-plugins/docker-compose"
 COMPOSE_STANDALONE_REL = "achost/bin/docker-compose"
@@ -679,10 +680,37 @@ else
     printf 'ACHost env not found\n' >&2
     exit 1
 fi
+native_root="${{ACHOST_NATIVE_ROOT:-${{ACHOST_VAR:-/data/adb/achost}}/native-root}}"
+supervise="${{ACHOST_SUPERVISE:-${{ACHOST_COMMON_BIN:-/data/adb/modules/achost-base/achost/bin}}/achost-supervise}}"
+if [ -x "$supervise" ]; then
+    exec "$supervise" --launch --native-root "$native_root" --close-range-enosys -- "$ACHOST/lxc/bin/$name" "$@"
+fi
 exec "$ACHOST/lxc/bin/$name" "$@"
 ACHOST_LXC_WRAPPER
         chmod 0755 "$target" 2>/dev/null || true
     done
+    target="$ksu_bin/achost-lxc-runtime"
+    if [ -e "$target" ] && ! grep -q 'ACHOST_LXC_RUNTIME_WRAPPER' "$target" 2>/dev/null; then
+        printf 'ACHost: keeping existing non-ACHost command: %s\n' "$target" >&2
+        return 0
+    fi
+    cat > "$target" <<'ACHOST_LXC_RUNTIME_WRAPPER'
+#!/system/bin/sh
+# ACHOST_LXC_RUNTIME_WRAPPER
+set -u
+ACHOST="${{ACHOST:-/data/adb/modules/achost-lxc/achost}}"
+if [ -r "$ACHOST/bin/achost-container-env.sh" ]; then
+    . "$ACHOST/bin/achost-container-env.sh"
+elif [ -r "/data/adb/modules/achost-base/achost/bin/achost-container-env.sh" ]; then
+    ACHOST_BASE="${{ACHOST_BASE:-/data/adb/modules/achost-base/achost}}"
+    . "$ACHOST_BASE/bin/achost-container-env.sh"
+else
+    printf 'ACHost env not found\n' >&2
+    exit 1
+fi
+exec "$ACHOST/bin/achost-lxc-runtime" "$@"
+ACHOST_LXC_RUNTIME_WRAPPER
+    chmod 0755 "$target" 2>/dev/null || true
 }}
 install_lxc_cli_wrappers
 '''
@@ -1108,6 +1136,8 @@ def install_lxc_asset(asset: str | Path, root: Path, expected_sha256: str | None
             copy_tar_member(archive, member, dst, mode)
             if rel_path == LXC_DOWNLOAD_TEMPLATE_REL:
                 patch_lxc_download_template(dst)
+            elif rel_path == LXC_COMMON_CONFIG_REL:
+                patch_lxc_common_config(dst)
             extracted_paths.append(rel_path)
             if rel_path.startswith("achost/lxc/bin/"):
                 name = PurePosixPath(rel_path).name
@@ -1161,6 +1191,12 @@ def patch_lxc_download_template(path: Path) -> None:
     text = text.replace('DOWNLOAD_VALIDATE="true"', 'DOWNLOAD_VALIDATE="${DOWNLOAD_VALIDATE:-false}"')
     path.write_text(text)
     os.chmod(path, 0o755)
+
+
+def patch_lxc_common_config(path: Path) -> None:
+    lines = path.read_text().splitlines()
+    filtered = [line for line in lines if not line.startswith("lxc.cgroup.devices.")]
+    path.write_text("\n".join(filtered) + "\n")
 
 
 def resolve_asset_file(asset: str | Path) -> Path:
@@ -1256,6 +1292,8 @@ def build_runtime_validation_report(
     check_release_entries(module_target, root, manifest, stage_entries, zip_entries, zip_infos, zip_path is not None, errors)
     if release:
         check_release_manifest(module_target, manifest, errors)
+        if module_target == "lxc":
+            check_lxc_release_config(root, errors)
         check_forbidden_release_entries(module_target, stage_entries | zip_entries, errors)
         check_unsafe_entries(stage_entries | zip_entries, errors)
     return validation_report(root, module_target, zip_path, release, manifest, stage_entries, zip_entries, errors)
@@ -1384,6 +1422,15 @@ def check_release_manifest(module_target: str, manifest: dict[str, Any], errors:
             errors.append(f"manifest assets.{name} is missing")
 
 
+def check_lxc_release_config(root: Path, errors: list[str]) -> None:
+    common_config = root / LXC_COMMON_CONFIG_REL
+    if not common_config.is_file():
+        return
+    for line in common_config.read_text().splitlines():
+        if line.startswith("lxc.cgroup.devices."):
+            errors.append(f"LXC common.conf keeps unsupported Android devices cgroup rule: {line}")
+
+
 def release_required_entries(module_target: str) -> tuple[str, ...]:
     common_module_entries = (
         "module.prop",
@@ -1427,6 +1474,7 @@ def release_required_entries(module_target: str) -> tuple[str, ...]:
         *(f"achost/lxc/bin/{name}" for name in LXC_REQUIRED_BINARIES),
         *(f"achost/lxc/bin/{name}" for name in LXC_DOWNLOAD_TOOL_WRAPPERS),
         LXC_DOWNLOAD_TEMPLATE_REL,
+        LXC_COMMON_CONFIG_REL,
     )
 
 
@@ -1867,6 +1915,10 @@ if [ -d /data/adb/ksu/bin ]; then
             rm -f "$wrapper" 2>/dev/null || true
         fi
     done
+    runtime_wrapper=/data/adb/ksu/bin/achost-lxc-runtime
+    if [ -r "$runtime_wrapper" ] && grep -q 'ACHOST_LXC_RUNTIME_WRAPPER' "$runtime_wrapper" 2>/dev/null; then
+        rm -f "$runtime_wrapper" 2>/dev/null || true
+    fi
 fi
 """
     common_stop = ""

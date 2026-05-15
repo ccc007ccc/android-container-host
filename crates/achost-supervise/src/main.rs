@@ -14,6 +14,16 @@ use std::time::Duration;
 const MAX_ARGS: usize = 128;
 const MAX_STRING: usize = 65535;
 const PR_SET_CHILD_SUBREAPER: c_int = 36;
+const PR_SET_SECCOMP: c_int = 22;
+const PR_SET_NO_NEW_PRIVS: c_int = 38;
+const SECCOMP_MODE_FILTER: libc::c_ulong = 2;
+const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+const BPF_LD_W_ABS: u16 = 0x20;
+const BPF_JMP_JEQ_K: u16 = 0x15;
+const BPF_RET_K: u16 = 0x06;
+const SECCOMP_DATA_NR_OFFSET: u32 = 0;
+const AARCH64_NR_CLOSE_RANGE: u32 = 436;
 
 static STOP_SERVER: AtomicBool = AtomicBool::new(false);
 static PENDING_SIGNAL: AtomicI32 = AtomicI32::new(0);
@@ -31,6 +41,7 @@ struct Options {
     server_mode: bool,
     client_mode: bool,
     launch_mode: bool,
+    close_range_enosys: bool,
 }
 
 extern "C" fn handle_signal(sig: c_int) {
@@ -42,7 +53,7 @@ extern "C" fn handle_signal(sig: c_int) {
 
 fn usage(argv0: &str) {
     eprintln!(
-        "usage:\n  {0} --server --socket PATH --pid-file PATH [--pivot-root PATH|--native-root PATH]\n  {0} --client --socket PATH --pid-file PATH [--name NAME] -- COMMAND [ARG...]\n  {0} --launch [--log-file PATH] [--chroot PATH|--pivot-root PATH] -- COMMAND [ARG...]\n  {0} --pid-file PATH [--name NAME] -- COMMAND [ARG...]",
+        "usage:\n  {0} --server --socket PATH --pid-file PATH [--pivot-root PATH|--native-root PATH]\n  {0} --client --socket PATH --pid-file PATH [--name NAME] -- COMMAND [ARG...]\n  {0} --launch [--log-file PATH] [--close-range-enosys] [--chroot PATH|--pivot-root PATH|--native-root PATH] -- COMMAND [ARG...]\n  {0} --pid-file PATH [--name NAME] -- COMMAND [ARG...]",
         argv0
     );
 }
@@ -50,6 +61,71 @@ fn usage(argv0: &str) {
 fn cstring(value: &str) -> io::Result<CString> {
     CString::new(value.as_bytes())
         .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "string contains nul byte"))
+}
+
+#[repr(C)]
+struct SockFilter {
+    code: u16,
+    jt: u8,
+    jf: u8,
+    k: u32,
+}
+
+#[repr(C)]
+struct SockFprog {
+    len: u16,
+    filter: *const SockFilter,
+}
+
+fn bpf_stmt(code: u16, k: u32) -> SockFilter {
+    SockFilter {
+        code,
+        jt: 0,
+        jf: 0,
+        k,
+    }
+}
+
+fn bpf_jump(code: u16, k: u32, jt: u8, jf: u8) -> SockFilter {
+    SockFilter { code, jt, jf, k }
+}
+
+fn install_close_range_enosys_filter() -> io::Result<()> {
+    let filter = [
+        bpf_stmt(BPF_LD_W_ABS, SECCOMP_DATA_NR_OFFSET),
+        bpf_jump(BPF_JMP_JEQ_K, AARCH64_NR_CLOSE_RANGE, 0, 1),
+        bpf_stmt(BPF_RET_K, SECCOMP_RET_ERRNO | libc::ENOSYS as u32),
+        bpf_stmt(BPF_RET_K, SECCOMP_RET_ALLOW),
+    ];
+    let program = SockFprog {
+        len: filter.len() as u16,
+        filter: filter.as_ptr(),
+    };
+    let apply_filter = || unsafe {
+        libc::prctl(
+            PR_SET_SECCOMP,
+            SECCOMP_MODE_FILTER,
+            &program as *const SockFprog as libc::c_ulong,
+            0,
+            0,
+        )
+    };
+    if apply_filter() == 0 {
+        eprintln!("achost-supervise: close_range ENOSYS seccomp=ready");
+        return Ok(());
+    }
+    let err = io::Error::last_os_error();
+    if !matches!(err.raw_os_error(), Some(libc::EACCES) | Some(libc::EPERM)) {
+        return Err(err);
+    }
+    if unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if apply_filter() < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    eprintln!("achost-supervise: close_range ENOSYS seccomp=ready no-new-privs=1");
+    Ok(())
 }
 
 fn write_pid_file(path: &str, pid: pid_t) -> io::Result<()> {
@@ -584,7 +660,9 @@ fn redirect_log(log_file: &str) -> io::Result<()> {
 fn run_launch(
     chroot_path: Option<&str>,
     pivot_root_path: Option<&str>,
+    native_root_path: Option<&str>,
     log_file: Option<&str>,
+    close_range_enosys: bool,
     command: &[String],
 ) -> c_int {
     if let Some(log_file) = log_file {
@@ -593,7 +671,12 @@ fn run_launch(
             return 1;
         }
     }
-    if let Some(pivot_root_path) = pivot_root_path {
+    if let Some(native_root_path) = native_root_path {
+        if let Err(err) = setup_native_root(native_root_path) {
+            eprintln!("native root: {}", err);
+            return 1;
+        }
+    } else if let Some(pivot_root_path) = pivot_root_path {
         if let Err(err) = pivot_to_root(pivot_root_path) {
             eprintln!("{}", last_error_with("pivot_root", err));
             return 1;
@@ -612,6 +695,12 @@ fn run_launch(
         }
         if let Err(err) = env::set_current_dir("/") {
             eprintln!("chdir: {}", err);
+            return 1;
+        }
+    }
+    if close_range_enosys {
+        if let Err(err) = install_close_range_enosys_filter() {
+            eprintln!("close_range ENOSYS seccomp: {}", err);
             return 1;
         }
     }
@@ -773,6 +862,7 @@ fn parse_args(args: &[String]) -> Result<Options, ()> {
             "--server" => opts.server_mode = true,
             "--client" => opts.client_mode = true,
             "--launch" => opts.launch_mode = true,
+            "--close-range-enosys" => opts.close_range_enosys = true,
             "--socket" if i + 1 < args.len() => {
                 i += 1;
                 opts.socket_path = Some(args[i].clone());
@@ -824,14 +914,21 @@ fn main() {
     };
     let command_index = opts.command_index.unwrap_or(usize::MAX);
     if opts.launch_mode {
+        let root_modes = [
+            opts.launch_chroot.is_some(),
+            opts.launch_pivot_root.is_some(),
+            opts.native_root.is_some(),
+        ]
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count();
         if opts.server_mode
             || opts.client_mode
             || opts.pid_file.is_some()
             || opts.socket_path.is_some()
-            || opts.native_root.is_some()
             || command_index == 0
             || command_index >= args.len()
-            || (opts.launch_chroot.is_some() && opts.launch_pivot_root.is_some())
+            || root_modes > 1
         {
             usage(argv0);
             process::exit(2);
@@ -839,7 +936,9 @@ fn main() {
         let code = run_launch(
             opts.launch_chroot.as_deref(),
             opts.launch_pivot_root.as_deref(),
+            opts.native_root.as_deref(),
             opts.launch_log_file.as_deref(),
+            opts.close_range_enosys,
             &args[command_index..],
         );
         process::exit(code);
@@ -850,6 +949,7 @@ fn main() {
             || opts.pid_file.is_none()
             || opts.launch_chroot.is_some()
             || opts.launch_log_file.is_some()
+            || opts.close_range_enosys
             || opts.command_index.is_some()
             || (opts.launch_pivot_root.is_some() && opts.native_root.is_some())
         {
@@ -871,6 +971,7 @@ fn main() {
             || opts.launch_pivot_root.is_some()
             || opts.native_root.is_some()
             || opts.launch_log_file.is_some()
+            || opts.close_range_enosys
             || command_index == 0
             || command_index >= args.len()
         {
@@ -889,6 +990,7 @@ fn main() {
         || opts.launch_pivot_root.is_some()
         || opts.native_root.is_some()
         || opts.launch_log_file.is_some()
+        || opts.close_range_enosys
         || opts.pid_file.is_none()
         || command_index == 0
         || command_index >= args.len()

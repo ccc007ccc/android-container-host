@@ -44,6 +44,8 @@ struct LxcConfig {
     lxc_log: PathBuf,
     lxc_rootfs: PathBuf,
     lxc_containers: PathBuf,
+    native_root: PathBuf,
+    supervise: PathBuf,
     bridge: String,
     subnet: String,
 }
@@ -71,6 +73,8 @@ impl LxcConfig {
                 }
             });
         let common_bin = env_path("ACHOST_COMMON_BIN").unwrap_or_else(|| common_root.join("bin"));
+        let achost_var =
+            env_path("ACHOST_VAR").unwrap_or_else(|| PathBuf::from("/data/adb/achost"));
         let lxc_module = env_path("ACHOST_LXC_MODULE").unwrap_or_else(|| achost.clone());
         let lxc_root = env_path("ACHOST_LXC").unwrap_or_else(|| {
             let split_root = lxc_module.join("lxc");
@@ -80,12 +84,13 @@ impl LxcConfig {
                 achost.join("lxc")
             }
         });
-        let lxc_var =
-            env_path("ACHOST_LXC_VAR").unwrap_or_else(|| PathBuf::from("/data/adb/achost/lxc"));
-        let lxc_run =
-            env_path("ACHOST_LXC_RUN").unwrap_or_else(|| PathBuf::from("/data/adb/achost/run/lxc"));
-        let lxc_log =
-            env_path("ACHOST_LXC_LOG").unwrap_or_else(|| PathBuf::from("/data/adb/achost/log/lxc"));
+        let lxc_var = env_path("ACHOST_LXC_VAR").unwrap_or_else(|| achost_var.join("lxc"));
+        let lxc_run = env_path("ACHOST_LXC_RUN").unwrap_or_else(|| achost_var.join("run/lxc"));
+        let lxc_log = env_path("ACHOST_LXC_LOG").unwrap_or_else(|| achost_var.join("log/lxc"));
+        let native_root =
+            env_path("ACHOST_NATIVE_ROOT").unwrap_or_else(|| achost_var.join("native-root"));
+        let supervise =
+            env_path("ACHOST_SUPERVISE").unwrap_or_else(|| common_bin.join("achost-supervise"));
         Self {
             achost: achost.clone(),
             achost_bin,
@@ -100,6 +105,8 @@ impl LxcConfig {
             lxc_rootfs: env_path("ACHOST_LXC_ROOTFS").unwrap_or_else(|| lxc_var.join("rootfs")),
             lxc_containers: env_path("ACHOST_LXC_CONTAINERS")
                 .unwrap_or_else(|| lxc_var.join("containers")),
+            native_root,
+            supervise,
             bridge: env_nonempty("LXC_BRIDGE").unwrap_or_else(|| "lxcbr0".to_string()),
             subnet: env_nonempty("LXC_SUBNET").unwrap_or_else(|| "172.32.0.0/16".to_string()),
         }
@@ -1880,17 +1887,17 @@ fn run_guest_capture(
     command: &[&str],
 ) -> Result<CommandResult, String> {
     validate_existing_container(config, name)?;
-    let program = find_lxc_binary(config, "lxc-attach")?;
-    let mut cmd = Command::new(program);
-    apply_lxc_env(config, &mut cmd);
-    let output = cmd
-        .arg("-P")
-        .arg(&config.lxc_containers)
-        .arg("-n")
-        .arg(name)
-        .arg("--clear-env")
-        .arg("--")
-        .args(command)
+    let mut args = vec![
+        "-P".to_string(),
+        path_string(&config.lxc_containers),
+        "-n".to_string(),
+        name.to_string(),
+        "--clear-env".to_string(),
+        "--".to_string(),
+    ];
+    args.extend(command.iter().map(|item| item.to_string()));
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = lxc_command(config, "lxc-attach", &arg_refs)?
         .output()
         .map_err(|error| format!("run lxc-attach: {error}"))?;
     let mut text = String::new();
@@ -2006,11 +2013,7 @@ fn find_lxc_binary(config: &LxcConfig, name: &str) -> Result<PathBuf, String> {
 }
 
 fn run_lxc_capture(config: &LxcConfig, name: &str, args: &[&str]) -> Result<CommandResult, String> {
-    let program = find_lxc_binary(config, name)?;
-    let mut command = Command::new(program);
-    apply_lxc_env(config, &mut command);
-    command.args(args);
-    let output = command
+    let output = lxc_command(config, name, args)?
         .output()
         .map_err(|error| format!("run {name}: {error}"))?;
     let mut text = String::new();
@@ -2020,6 +2023,26 @@ fn run_lxc_capture(config: &LxcConfig, name: &str, args: &[&str]) -> Result<Comm
         ok: output.status.success(),
         output: trim_trailing_newlines(text),
     })
+}
+
+fn lxc_command(config: &LxcConfig, name: &str, args: &[&str]) -> Result<Command, String> {
+    let program = find_lxc_binary(config, name)?;
+    let mut command = if config.supervise.exists() && is_executable(&config.supervise) {
+        let mut command = Command::new(&config.supervise);
+        command
+            .arg("--launch")
+            .arg("--native-root")
+            .arg(&config.native_root)
+            .arg("--close-range-enosys")
+            .arg("--")
+            .arg(program);
+        command
+    } else {
+        Command::new(program)
+    };
+    apply_lxc_env(config, &mut command);
+    command.args(args);
+    Ok(command)
 }
 
 fn apply_lxc_env(config: &LxcConfig, command: &mut Command) {
@@ -2042,7 +2065,12 @@ fn apply_lxc_env(config: &LxcConfig, command: &mut Command) {
         .env("ACHOST_LXC", &config.lxc_root)
         .env("ACHOST_LXC_BIN", &config.lxc_bin)
         .env("ACHOST_LXC_ETC", &config.lxc_etc)
+        .env("ACHOST_LXC_RUN", &config.lxc_run)
+        .env("ACHOST_LXC_LOG", &config.lxc_log)
+        .env("ACHOST_LXC_ROOTFS", &config.lxc_rootfs)
         .env("ACHOST_LXC_CONTAINERS", &config.lxc_containers)
+        .env("ACHOST_NATIVE_ROOT", &config.native_root)
+        .env("ACHOST_SUPERVISE", &config.supervise)
         .env("LXC_BRIDGE", &config.bridge)
         .env("LXC_SUBNET", &config.subnet);
 }
@@ -2050,6 +2078,10 @@ fn apply_lxc_env(config: &LxcConfig, command: &mut Command) {
 fn path_str(path: &Path) -> Result<&str, String> {
     path.to_str()
         .ok_or_else(|| format!("non-utf8 path: {}", path.display()))
+}
+
+fn path_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 fn section(title: &str) {
@@ -2069,6 +2101,8 @@ fn print_config_paths(config: &LxcConfig) {
     println!("ACHOST_LXC_LOG={}", config.lxc_log.display());
     println!("ACHOST_LXC_ROOTFS={}", config.lxc_rootfs.display());
     println!("ACHOST_LXC_CONTAINERS={}", config.lxc_containers.display());
+    println!("ACHOST_NATIVE_ROOT={}", config.native_root.display());
+    println!("ACHOST_SUPERVISE={}", config.supervise.display());
     println!("LXC_BRIDGE={}", config.bridge);
     println!("LXC_SUBNET={}", config.subnet);
 }
@@ -2422,6 +2456,8 @@ mod tests {
             lxc_log: PathBuf::from("/data/adb/achost/log/lxc"),
             lxc_rootfs: PathBuf::from("/data/adb/achost/lxc/rootfs"),
             lxc_containers: PathBuf::from("/data/adb/achost/lxc/containers"),
+            native_root: PathBuf::from("/data/adb/achost/native-root"),
+            supervise: PathBuf::from("/base/achost/bin/achost-supervise"),
             bridge: "lxcbr0".to_string(),
             subnet: "172.32.0.0/16".to_string(),
         }

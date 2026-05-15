@@ -20,6 +20,7 @@ from achost.runtime_install import (
     COMPOSE_PLUGIN_REL,
     COMPOSE_STANDALONE_REL,
     DOCKER_REQUIRED_BINARIES,
+    LXC_COMMON_CONFIG_REL,
     LXC_DOWNLOAD_TOOL_WRAPPERS,
     LXC_REQUIRED_BINARIES,
     STALE_RUNTIME_ENTRYPOINTS,
@@ -217,7 +218,10 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("ACHOST_DOCKER_WRAPPER", customize_text)
             self.assertIn("ACHOST_LXC_WRAPPER", service_text)
             self.assertIn("ACHOST_LXC_WRAPPER", customize_text)
-            self.assertIn('exec "$ACHOST/lxc/bin/$name" "$@"', service_text)
+            self.assertIn("ACHOST_LXC_RUNTIME_WRAPPER", service_text)
+            self.assertIn("ACHOST_LXC_RUNTIME_WRAPPER", customize_text)
+            self.assertIn('exec "$supervise" --launch --native-root "$native_root" --close-range-enosys -- "$ACHOST/lxc/bin/$name" "$@"', service_text)
+            self.assertIn('exec "$ACHOST/bin/achost-lxc-runtime" "$@"', service_text)
             self.assertIn("achost-docker-runtime", uninstall_text)
             self.assertIn('"$ACHOST/bin/achost-docker-runtime" stop', uninstall_text)
             self.assertIn("grep -q 'ACHOST_DOCKER_WRAPPER'", uninstall_text)
@@ -225,6 +229,8 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("grep -q 'ACHOST_LXC_WRAPPER'", uninstall_text)
             self.assertIn("/data/adb/ksu/bin/lxc*", uninstall_text)
             self.assertIn("/data/adb/ksu/bin/lxd*", uninstall_text)
+            self.assertIn("ACHOST_LXC_RUNTIME_WRAPPER", uninstall_text)
+            self.assertIn("/data/adb/ksu/bin/achost-lxc-runtime", uninstall_text)
             self.assertIn("/data/local/tmp/achost-network-watchdog.pid", uninstall_text)
             self.assertIn("/data/adb/modules/achost-runtime/achost/etc/lxc/android-common.conf", lxc_config.read_text())
             self.assertIn("lxc.net.0.link = lxcbr0", lxc_config.read_text())
@@ -484,7 +490,7 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("keeping existing non-ACHost command", customize_text)
             self.assertIn("ACHOST_LXC_WRAPPER", service_text)
             self.assertIn("ACHOST_LXC_WRAPPER", customize_text)
-            self.assertIn('exec "$ACHOST/lxc/bin/$name" "$@"', service_text)
+            self.assertIn('exec "$supervise" --launch --native-root "$native_root" --close-range-enosys -- "$ACHOST/lxc/bin/$name" "$@"', service_text)
             self.assertIn('"$ACHOST/bin/achost-lxc-runtime" autostart', service_text)
             self.assertIn("lxc-autostart.log", service_text)
             self.assertIn('"$ACHOST_VAR/lxc"', service_text)
@@ -730,6 +736,8 @@ class RuntimeInstallTest(unittest.TestCase):
                 self.assertIn(f"achost/lxc/bin/{name}", names)
             template = (output / "achost" / "lxc" / "share" / "lxc" / "templates" / "lxc-download").read_text()
             self.assertIn('DOWNLOAD_VALIDATE="${DOWNLOAD_VALIDATE:-false}"', template)
+            common_config = (output / LXC_COMMON_CONFIG_REL).read_text()
+            self.assertNotIn("lxc.cgroup.devices.", common_config)
 
     def test_release_validator_rejects_lxc_module_without_download_template(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -890,6 +898,9 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertTrue(template.exists())
             self.assertTrue(template.stat().st_mode & stat.S_IXUSR)
             self.assertIn('DOWNLOAD_VALIDATE="${DOWNLOAD_VALIDATE:-false}"', template.read_text())
+            common_config = output / LXC_COMMON_CONFIG_REL
+            self.assertTrue(common_config.exists())
+            self.assertNotIn("lxc.cgroup.devices.", common_config.read_text())
             for name in LXC_DOWNLOAD_TOOL_WRAPPERS:
                 wrapper = output / "achost" / "lxc" / "bin" / name
                 self.assertTrue(wrapper.exists(), name)
@@ -975,6 +986,11 @@ class RuntimeInstallTest(unittest.TestCase):
                 info.size = len(data)
                 info.mode = 0o644
                 archive.addfile(info, io.BytesIO(data))
+            data = b"lxc.cgroup.devices.deny = a\nlxc.cgroup.devices.allow = c *:* m\nlxc.mount.auto = cgroup:mixed proc:mixed sys:mixed\n"
+            info = tarfile.TarInfo("lxc/share/lxc/config/common.conf")
+            info.size = len(data)
+            info.mode = 0o644
+            archive.addfile(info, io.BytesIO(data))
 
     def write_buildkit_asset(self, path: Path, names=BUILDKIT_REQUIRED_BINARIES):
         with tarfile.open(path, "w:gz") as archive:

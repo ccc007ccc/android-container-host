@@ -10,7 +10,7 @@ SCRIPTS = PROJECT_ROOT / "scripts"
 class PackageScriptsTest(unittest.TestCase):
     def run_script(self, name: str) -> str:
         result = subprocess.run(
-            [str(SCRIPTS / name), "--version", "0.1.2", "--dry-run"],
+            [str(SCRIPTS / name), "--version", "0.1.3", "--dry-run"],
             cwd=PROJECT_ROOT,
             check=True,
             stdout=subprocess.PIPE,
@@ -23,7 +23,7 @@ class PackageScriptsTest(unittest.TestCase):
         output = self.run_script("package-base.sh")
 
         self.assertIn("--module-target base", output)
-        self.assertIn("achost-base-v0.1.2.zip", output)
+        self.assertIn("achost-base-v0.1.3.zip", output)
         self.assertNotIn("--docker-asset", output)
         self.assertNotIn("--compose-asset", output)
         self.assertNotIn("--buildx-asset", output)
@@ -34,7 +34,7 @@ class PackageScriptsTest(unittest.TestCase):
         output = self.run_script("package-docker.sh")
 
         self.assertIn("--module-target docker", output)
-        self.assertIn("achost-docker-v0.1.2.zip", output)
+        self.assertIn("achost-docker-v0.1.3.zip", output)
         self.assertIn("--docker-asset", output)
         self.assertIn("--docker-sha256", output)
         self.assertIn("--compose-asset", output)
@@ -51,7 +51,7 @@ class PackageScriptsTest(unittest.TestCase):
         output = self.run_script("package-lxc.sh")
 
         self.assertIn("--module-target lxc", output)
-        self.assertIn("achost-lxc-v0.1.2.zip", output)
+        self.assertIn("achost-lxc-v0.1.3.zip", output)
         self.assertIn("--lxc-asset", output)
         self.assertIn("--lxc-sha256", output)
         self.assertNotIn("--docker-asset", output)
