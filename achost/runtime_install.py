@@ -1312,8 +1312,8 @@ def module_prop(spec: ModuleSpec) -> str:
     requires = "".join(f"requires={item}\n" for item in spec.requires)
     return f"""id={spec.module_id}
 name={spec.name}
-version=0.1.0
-versionCode=1
+version=0.1.1
+versionCode=2
 author=ccc007
 {requires}description={spec.description}
 """
