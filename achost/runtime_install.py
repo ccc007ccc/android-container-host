@@ -207,6 +207,8 @@ def generate_runtime_package(
     start_docker_on_boot: bool = False,
     docker_runtime_mode: str = "native",
     module_target: str = "legacy",
+    version: str | None = None,
+    version_code: int | None = None,
 ) -> dict[str, Any]:
     if mode not in SUPPORTED_MODES:
         raise ValueError(f"unsupported runtime package mode: {mode}")
@@ -230,6 +232,12 @@ def generate_runtime_package(
         raise ValueError("lxc checksum requires an lxc asset")
     if start_docker_on_boot and mode != "kernelsu-module":
         raise ValueError("start_docker_on_boot is only supported for kernelsu-module mode")
+    module_version = version or __version__
+    module_version_code = __version_code__ if version_code is None else version_code
+    if not module_version:
+        raise ValueError("module version cannot be empty")
+    if module_version_code < 1:
+        raise ValueError("module version code must be positive")
 
     spec = MODULE_SPECS[module_target]
     if start_docker_on_boot and not spec.include_docker:
@@ -361,7 +369,15 @@ def generate_runtime_package(
         files.extend(write_lxc_download_tool_wrappers(root))
     if mode == "kernelsu-module" and spec.include_webui:
         files.extend(install_webui(root, spec))
-    entrypoints = write_mode_files(root, mode, spec, files, start_docker_on_boot=start_docker_on_boot)
+    entrypoints = write_mode_files(
+        root,
+        mode,
+        spec,
+        files,
+        version=module_version,
+        version_code=module_version_code,
+        start_docker_on_boot=start_docker_on_boot,
+    )
     files.append(RuntimeFile("manifest.json", None, False, category="module-config"))
     included_categories = sorted({item.category for item in files})
     report = {
@@ -369,6 +385,8 @@ def generate_runtime_package(
         "module_target": module_target,
         "module_id": spec.module_id if mode == "kernelsu-module" else None,
         "module_name": spec.name if mode == "kernelsu-module" else None,
+        "version": module_version,
+        "version_code": module_version_code,
         "data_root": spec.data_root if mode == "kernelsu-module" else None,
         "requires": list(spec.requires) if mode == "kernelsu-module" else [],
         "provides": list(spec.provides) if mode == "kernelsu-module" else [],
@@ -1597,11 +1615,13 @@ def write_mode_files(
     mode: str,
     spec: ModuleSpec,
     files: list[RuntimeFile],
+    version: str,
+    version_code: int,
     start_docker_on_boot: bool = False,
 ) -> list[str]:
     if mode == "kernelsu-module":
         generated = {
-            "module.prop": module_prop(spec),
+            "module.prop": module_prop(spec, version, version_code),
             "post-fs-data.sh": post_fs_data_script(),
             "service.sh": service_script(spec, start_docker_on_boot=start_docker_on_boot),
             "customize.sh": customize_script(spec, start_docker_on_boot=start_docker_on_boot),
@@ -1679,12 +1699,12 @@ printf 'For plain docker in this shell: export PATH=%s/wrappers:%s/bin:$PATH\n' 
 """.replace("@PRUNE_STALE_RUNTIME_ENTRYPOINTS_FUNCTION@", prune_stale_runtime_entrypoints_function().rstrip())
 
 
-def module_prop(spec: ModuleSpec) -> str:
+def module_prop(spec: ModuleSpec, version: str, version_code: int) -> str:
     requires = "".join(f"requires={item}\n" for item in spec.requires)
     return f"""id={spec.module_id}
 name={spec.name}
-version={__version__}
-versionCode={__version_code__}
+version={version}
+versionCode={version_code}
 author=ccc007
 {requires}description={spec.description}
 """
@@ -1693,6 +1713,7 @@ author=ccc007
 def post_fs_data_script() -> str:
     return """#!/system/bin/sh
 MODDIR="${0%/*}"
+[ "$MODDIR" != "$0" ] || MODDIR="$(pwd)"
 CONF="$MODDIR/achost/etc/sysctl.d/99-container-host.conf"
 
 [ -r "$CONF" ] || exit 0
@@ -1824,6 +1845,7 @@ fi
 """
     return f"""#!/system/bin/sh
 MODDIR="${{0%/*}}"
+[ "$MODDIR" != "$0" ] || MODDIR="$(pwd)"
 ACHOST="${{ACHOST:-$MODDIR/achost}}"
 ACHOST_DATA="{spec.data_root}"
 PATH=/system/bin:/system/xbin:/vendor/bin:/product/bin:/data/adb/magisk:$PATH
@@ -1872,6 +1894,7 @@ chmod 0755 "$ACHOST/lxc/share/lxc/templates"/lxc-* 2>/dev/null || true
 """
     return f"""#!/system/bin/sh
 MODDIR="${{MODPATH:-${{0%/*}}}}"
+[ "$MODDIR" != "$0" ] || MODDIR="$(pwd)"
 ACHOST="$MODDIR/achost"
 ACHOST_DATA="{spec.data_root}"
 
@@ -1936,6 +1959,7 @@ rm -f "$pid_file" /data/local/tmp/achost-network-watchdog.pid /data/local/tmp/ac
 """
     return f"""#!/system/bin/sh
 MODDIR="${{0%/*}}"
+[ "$MODDIR" != "$0" ] || MODDIR="$(pwd)"
 ACHOST="${{ACHOST:-$MODDIR/achost}}"
 ACHOST_DATA="{spec.data_root}"
 PATH=/system/bin:/system/xbin:/vendor/bin:/product/bin:/data/adb/magisk:$PATH

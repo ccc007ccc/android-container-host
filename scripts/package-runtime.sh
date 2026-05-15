@@ -22,6 +22,11 @@ from achost import __version__
 print(__version__)
 PY
 )"
+VERSION_CODE="$(PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PY'
+from achost import __version_code__
+print(__version_code__)
+PY
+)"
 ASSETS_DIR="$PROJECT_ROOT/out/assets"
 OUT_ROOT=""
 CLEAN_OUTPUT=0
@@ -55,6 +60,7 @@ Usage: package-runtime.sh <base|docker|lxc> [options]
 
 Options:
   --version VERSION          Package version, default from achost.__version__
+  --version-code CODE       Android module versionCode, default from achost.__version_code__
   --out-root DIR            Output root, default out/achost-v<VERSION>
   --assets-dir DIR          Asset directory, default out/assets
   --clean-output            Remove this target's stage dir and zip under out before packaging
@@ -75,6 +81,10 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --version)
             VERSION="$2"
+            shift 2
+            ;;
+        --version-code)
+            VERSION_CODE="$2"
             shift 2
             ;;
         --out-root)
@@ -222,6 +232,8 @@ INSTALL_CMD=(
     runtime-install
     --mode kernelsu-module
     --module-target "$TARGET"
+    --version "$VERSION"
+    --version-code "$VERSION_CODE"
     --cgroup-mode v1
     --output "$STAGE_DIR"
     --zip "$ZIP_PATH"

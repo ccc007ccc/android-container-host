@@ -73,10 +73,11 @@ struct DockerRuntimeConfig {
 
 impl DockerRuntimeConfig {
     fn from_env() -> Self {
-        let achost = env_path("ACHOST").unwrap_or_else(|| PathBuf::from("/data/adb/achost"));
-        let achost_var = env_path("ACHOST_VAR").unwrap_or_else(|| achost.join("var"));
+        let achost = env_path("ACHOST").unwrap_or_else(default_achost_root);
+        let achost_var = env_path("ACHOST_VAR").unwrap_or_else(|| default_achost_var(&achost));
         let achost_bin = env_path("ACHOST_BIN").unwrap_or_else(|| achost.join("bin"));
-        let common_bin = env_path("ACHOST_COMMON_BIN").unwrap_or_else(|| achost_bin.clone());
+        let common_bin = env_path("ACHOST_COMMON_BIN")
+            .unwrap_or_else(|| default_common_bin(&achost, &achost_bin));
         let run = env_path("ACHOST_RUN").unwrap_or_else(|| achost_var.join("run"));
         let log_dir = env_path("ACHOST_LOG_DIR").unwrap_or_else(|| achost_var.join("log"));
         let runtime_mode = env::var("ACHOST_RUNTIME_MODE").unwrap_or_else(|_| "native".to_string());
@@ -187,10 +188,11 @@ struct DockerStopConfig {
 
 impl DockerStopConfig {
     fn from_env() -> Self {
-        let achost = env_path("ACHOST").unwrap_or_else(|| PathBuf::from("/data/adb/achost"));
-        let achost_var = env_path("ACHOST_VAR").unwrap_or_else(|| achost.join("var"));
+        let achost = env_path("ACHOST").unwrap_or_else(default_achost_root);
+        let achost_var = env_path("ACHOST_VAR").unwrap_or_else(|| default_achost_var(&achost));
         let achost_bin = env_path("ACHOST_BIN").unwrap_or_else(|| achost.join("bin"));
-        let common_bin = env_path("ACHOST_COMMON_BIN").unwrap_or_else(|| achost_bin.clone());
+        let common_bin = env_path("ACHOST_COMMON_BIN")
+            .unwrap_or_else(|| default_common_bin(&achost, &achost_bin));
         let run = env_path("ACHOST_RUN").unwrap_or_else(|| achost_var.join("run"));
         Self {
             use_chroot: env::var("ACHOST_USE_CHROOT").is_ok_and(|value| value == "1"),
@@ -224,6 +226,32 @@ impl DockerStopConfig {
                 .unwrap_or_else(|| PathBuf::from("/data/local/tmp/achost-network-watchdog.log")),
         }
     }
+}
+
+fn default_achost_root() -> PathBuf {
+    env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().and_then(Path::parent).map(Path::to_path_buf))
+        .filter(|path| path.join("etc/achost-runtime.conf").is_file())
+        .unwrap_or_else(|| PathBuf::from("/data/adb/achost"))
+}
+
+fn default_achost_var(achost: &Path) -> PathBuf {
+    split_module_data_root(achost).unwrap_or_else(|| achost.join("var"))
+}
+
+fn default_common_bin(achost: &Path, achost_bin: &Path) -> PathBuf {
+    if split_module_data_root(achost).is_some() {
+        PathBuf::from("/data/adb/modules/achost-base/achost/bin")
+    } else {
+        achost_bin.to_path_buf()
+    }
+}
+
+fn split_module_data_root(achost: &Path) -> Option<PathBuf> {
+    achost
+        .starts_with("/data/adb/modules")
+        .then(|| PathBuf::from("/data/adb/achost"))
 }
 
 fn main() {
@@ -1310,6 +1338,10 @@ fn remove_iptables_rule(iptables: &str, table: &str, chain: &str, args: &[&str])
 }
 
 fn stop_pid_file(name: &str, pid_file: &Path, expected_executable: &Path) {
+    stop_pid_file_any(name, pid_file, &[expected_executable.to_path_buf()]);
+}
+
+fn stop_pid_file_any(name: &str, pid_file: &Path, expected_executables: &[PathBuf]) {
     if !pid_file.is_file() {
         println!("{name} pid file missing: {}", pid_file.display());
         return;
@@ -1328,10 +1360,10 @@ fn stop_pid_file(name: &str, pid_file: &Path, expected_executable: &Path) {
         return;
     }
 
-    if !process_uses_executable(pid, expected_executable) {
+    if !process_uses_any_executable(pid, expected_executables) {
         println!(
             "{name} pid={pid} not achost-owned expected={}; skipping signal",
-            expected_executable.display()
+            join_paths(expected_executables)
         );
         remove_file_quiet(pid_file);
         return;
@@ -1352,13 +1384,21 @@ fn stop_pid_file(name: &str, pid_file: &Path, expected_executable: &Path) {
 }
 
 fn stop_network_watchdog(config: &DockerStopConfig) {
-    let runtime_core = config.common_bin.join("achost-runtime-core");
-    stop_pid_file(
+    let runtime_core = runtime_core_candidates(config);
+    stop_pid_file_any(
         "network-watchdog",
         &config.network_watchdog_pid,
         &runtime_core,
     );
-    stop_owned_processes_with_arg("network-watchdog", &runtime_core, "net-watchdog");
+    stop_owned_processes_with_arg_any("network-watchdog", &runtime_core, "net-watchdog");
+}
+
+fn runtime_core_candidates(config: &DockerStopConfig) -> Vec<PathBuf> {
+    unique_paths([
+        config.common_bin.join("achost-runtime-core"),
+        PathBuf::from("/data/adb/modules/achost-base/achost/bin/achost-runtime-core"),
+        PathBuf::from("/data/adb/achost/bin/achost-runtime-core"),
+    ])
 }
 
 fn stop_owned_processes(name: &str, expected_executable: &Path) {
@@ -1366,8 +1406,8 @@ fn stop_owned_processes(name: &str, expected_executable: &Path) {
     stop_pid_list(name, &pids);
 }
 
-fn stop_owned_processes_with_arg(name: &str, expected_executable: &Path, arg: &str) {
-    let pids = pids_for_executable_with_arg(expected_executable, arg);
+fn stop_owned_processes_with_arg_any(name: &str, expected_executables: &[PathBuf], arg: &str) {
+    let pids = pids_for_executables_with_arg(expected_executables, arg);
     stop_pid_list(name, &pids);
 }
 
@@ -1411,7 +1451,7 @@ fn pids_for_executable(name: &str, expected_executable: &Path) -> Vec<u32> {
     pids
 }
 
-fn pids_for_executable_with_arg(expected_executable: &Path, arg: &str) -> Vec<u32> {
+fn pids_for_executables_with_arg(expected_executables: &[PathBuf], arg: &str) -> Vec<u32> {
     let Ok(entries) = fs::read_dir("/proc") else {
         return Vec::new();
     };
@@ -1421,7 +1461,7 @@ fn pids_for_executable_with_arg(expected_executable: &Path, arg: &str) -> Vec<u3
         let Some(pid) = file_name.to_string_lossy().parse::<u32>().ok() else {
             continue;
         };
-        if process_uses_executable(pid, expected_executable) && process_has_arg(pid, arg) {
+        if process_uses_any_executable(pid, expected_executables) && process_has_arg(pid, arg) {
             pids.push(pid);
         }
     }
@@ -1437,6 +1477,12 @@ fn process_uses_executable(pid: u32, expected_executable: &Path) -> bool {
     read_cmdline_args(pid)
         .first()
         .is_some_and(|arg0| Path::new(arg0) == expected_executable)
+}
+
+fn process_uses_any_executable(pid: u32, expected_executables: &[PathBuf]) -> bool {
+    expected_executables
+        .iter()
+        .any(|expected| process_uses_executable(pid, expected))
 }
 
 fn process_has_arg(pid: u32, expected_arg: &str) -> bool {
@@ -1460,10 +1506,7 @@ fn read_cmdline_args(pid: u32) -> Vec<String> {
 fn report_stop_state(config: &DockerStopConfig) {
     let dockerd = pids_for_executable("dockerd", &config.achost_bin.join("dockerd"));
     let containerd = pids_for_executable("containerd", &config.achost_bin.join("containerd"));
-    let watchdog = pids_for_executable_with_arg(
-        &config.common_bin.join("achost-runtime-core"),
-        "net-watchdog",
-    );
+    let watchdog = pids_for_executables_with_arg(&runtime_core_candidates(config), "net-watchdog");
     println!("remaining_dockerd_pids={}", join_pids(&dockerd));
     println!("remaining_containerd_pids={}", join_pids(&containerd));
     println!("remaining_network_watchdog_pids={}", join_pids(&watchdog));
@@ -1492,6 +1535,24 @@ fn join_pids(pids: &[u32]) -> String {
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn join_paths(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn unique_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut output = Vec::new();
+    for path in paths {
+        if !output.iter().any(|existing| existing == &path) {
+            output.push(path);
+        }
+    }
+    output
 }
 
 fn unmount_chroot(config: &DockerStopConfig) {
@@ -1762,6 +1823,33 @@ mod tests {
         );
         assert_eq!(unix_socket_path("tcp://127.0.0.1:2375"), None);
         assert_eq!(unix_socket_path("unix://"), None);
+    }
+
+    #[test]
+    fn split_module_defaults_use_shared_data_and_base_common_bin() {
+        let achost = Path::new("/data/adb/modules/achost-docker/achost");
+        let achost_bin = achost.join("bin");
+
+        assert_eq!(
+            default_achost_var(achost),
+            PathBuf::from("/data/adb/achost")
+        );
+        assert_eq!(
+            default_common_bin(achost, &achost_bin),
+            PathBuf::from("/data/adb/modules/achost-base/achost/bin")
+        );
+    }
+
+    #[test]
+    fn manual_defaults_keep_local_var_and_common_bin() {
+        let achost = Path::new("/data/adb/achost");
+        let achost_bin = achost.join("bin");
+
+        assert_eq!(
+            default_achost_var(achost),
+            PathBuf::from("/data/adb/achost/var")
+        );
+        assert_eq!(default_common_bin(achost, &achost_bin), achost_bin);
     }
 
     #[test]

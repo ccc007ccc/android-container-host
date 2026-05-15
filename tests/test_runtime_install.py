@@ -202,6 +202,8 @@ class RuntimeInstallTest(unittest.TestCase):
             service_text = service.read_text()
             customize_text = customize.read_text()
             uninstall_text = uninstall.read_text()
+            self.assertIn('[ "$MODDIR" != "$0" ] || MODDIR="$(pwd)"', service_text)
+            self.assertIn('[ "$MODDIR" != "$0" ] || MODDIR="$(pwd)"', customize_text)
             self.assertIn("achost-runtime-core", service_text)
             self.assertIn("protect-daemons", service_text)
             self.assertIn("net-watchdog", service_text)
@@ -246,6 +248,26 @@ class RuntimeInstallTest(unittest.TestCase):
             manifest = json.loads((output / "manifest.json").read_text())
             categories = {item["path"]: item["category"] for item in manifest["files"]}
             self.assertEqual(categories["webroot/index.html"], "webui")
+
+    def test_kernelsu_module_uses_explicit_version_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "module"
+            report = generate_runtime_package(
+                output,
+                mode="kernelsu-module",
+                module_target="base",
+                version="9.8.7",
+                version_code=987,
+            )
+
+            module_prop = (output / "module.prop").read_text()
+            manifest = json.loads((output / "manifest.json").read_text())
+            self.assertIn("version=9.8.7", module_prop)
+            self.assertIn("versionCode=987", module_prop)
+            self.assertEqual(report["version"], "9.8.7")
+            self.assertEqual(report["version_code"], 987)
+            self.assertEqual(manifest["version"], "9.8.7")
+            self.assertEqual(manifest["version_code"], 987)
 
     def test_kernelsu_module_zip_contains_root_entries(self):
         with tempfile.TemporaryDirectory() as tmp:

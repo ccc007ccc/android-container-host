@@ -121,6 +121,8 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_install.add_argument("--output", required=True)
     runtime_install.add_argument("--mode", choices=("manual", "kernelsu-module"), default="manual")
     runtime_install.add_argument("--module-target", choices=("legacy", "base", "docker", "lxc"), default="legacy")
+    runtime_install.add_argument("--version")
+    runtime_install.add_argument("--version-code", type=int)
     runtime_install.add_argument("--cgroup-mode", choices=("v1", "v2"), default="v1")
     runtime_install.add_argument("--docker-runtime-mode", choices=("native",), default="native")
     runtime_install.add_argument("--docker-asset")
@@ -285,6 +287,8 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         start_docker_on_boot=args.start_docker_on_boot,
         docker_runtime_mode=args.docker_runtime_mode,
         module_target=args.module_target,
+        version=args.version,
+        version_code=args.version_code,
     )
     if args.zip_output is not None:
         zip_output = None if args.zip_output == "auto" else args.zip_output

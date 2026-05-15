@@ -88,16 +88,16 @@ rootfs tarball 不进入 LXC 模块包。把 rootfs 放到设备路径后，用 
 PC，在仓库根目录：
 
 ```bash
-scripts/package-all.sh --version 0.1.3
+scripts/package-all.sh --version 0.1.4
 ```
 
 输出：
 
 ```text
-out/achost-v0.1.3/achost-base-v0.1.3.zip
-out/achost-v0.1.3/achost-docker-v0.1.3.zip
-out/achost-v0.1.3/achost-lxc-v0.1.3.zip
-out/achost-v0.1.3/SHA256SUMS.txt
+out/achost-v0.1.4/achost-base-v0.1.4.zip
+out/achost-v0.1.4/achost-docker-v0.1.4.zip
+out/achost-v0.1.4/achost-lxc-v0.1.4.zip
+out/achost-v0.1.4/SHA256SUMS.txt
 ```
 
 不传 `--version` 时，脚本默认读取 `achost.__version__`。
@@ -105,9 +105,9 @@ out/achost-v0.1.3/SHA256SUMS.txt
 ## 单独打包某个模块
 
 ```bash
-scripts/package-base.sh --version 0.1.3
-scripts/package-docker.sh --version 0.1.3
-scripts/package-lxc.sh --version 0.1.3
+scripts/package-base.sh --version 0.1.4
+scripts/package-docker.sh --version 0.1.4
+scripts/package-lxc.sh --version 0.1.4
 ```
 
 每个脚本都会：
@@ -120,7 +120,7 @@ scripts/package-lxc.sh --version 0.1.3
 默认拒绝覆盖已有输出。需要重打当前版本时，只清理当前目标输出：
 
 ```bash
-scripts/package-docker.sh --version 0.1.3 --clean-output
+scripts/package-docker.sh --version 0.1.4 --clean-output
 ```
 
 `--clean-output` 只允许清理仓库 `out/` 下当前版本的对应 stage 和 zip，不会删除整个 `out/`。
@@ -130,13 +130,13 @@ scripts/package-docker.sh --version 0.1.3 --clean-output
 如果不用默认 `out/assets/`，可以指定资产目录：
 
 ```bash
-scripts/package-all.sh --version 0.1.3 --assets-dir /path/to/assets
+scripts/package-all.sh --version 0.1.4 --assets-dir /path/to/assets
 ```
 
 也可以逐项覆盖。正式包要求自定义资产和 sha256 成对出现：
 
 ```bash
-scripts/package-docker.sh --version 0.1.3 \
+scripts/package-docker.sh --version 0.1.4 \
   --docker-asset /path/to/docker-29.4.3.tgz \
   --docker-sha256 <sha256> \
   --compose-asset /path/to/docker-compose-linux-aarch64 \
@@ -146,7 +146,7 @@ scripts/package-docker.sh --version 0.1.3 \
   --buildkit-asset /path/to/buildkit-v0.29.0.linux-arm64.tar.gz \
   --buildkit-sha256 <sha256>
 
-scripts/package-lxc.sh --version 0.1.3 \
+scripts/package-lxc.sh --version 0.1.4 \
   --lxc-asset /path/to/lxc-userland-android-arm64-lxc-3.1.0.tar.gz \
   --lxc-sha256 <sha256>
 ```
@@ -154,7 +154,7 @@ scripts/package-lxc.sh --version 0.1.3 \
 可以先 dry-run 检查命令，不实际打包：
 
 ```bash
-scripts/package-docker.sh --version 0.1.3 --dry-run
+scripts/package-docker.sh --version 0.1.4 --dry-run
 ```
 
 ## 输出物检查
@@ -162,13 +162,13 @@ scripts/package-docker.sh --version 0.1.3 --dry-run
 脚本会自动跑 release validator。手工复查可以用：
 
 ```bash
-unzip -l out/achost-v0.1.3/achost-docker-v0.1.3.zip \
+unzip -l out/achost-v0.1.4/achost-docker-v0.1.4.zip \
   | grep -E 'docker-compose|docker-buildx|buildctl|buildkitd'
 
-unzip -l out/achost-v0.1.3/achost-lxc-v0.1.3.zip \
+unzip -l out/achost-v0.1.4/achost-lxc-v0.1.4.zip \
   | grep 'lxc-download'
 
-cd out/achost-v0.1.3
+cd out/achost-v0.1.4
 sha256sum -c SHA256SUMS.txt
 ```
 
@@ -177,8 +177,8 @@ sha256sum -c SHA256SUMS.txt
 ```bash
 PYTHONPATH=$PWD python3 -m achost.cli runtime-validate \
   --module-target docker \
-  --package-root out/achost-v0.1.3/achost-docker \
-  --zip out/achost-v0.1.3/achost-docker-v0.1.3.zip \
+  --package-root out/achost-v0.1.4/achost-docker \
+  --zip out/achost-v0.1.4/achost-docker-v0.1.4.zip \
   --release
 ```
 
@@ -218,7 +218,7 @@ PYTHONPATH=$PWD python3 -m achost.cli runtime-install \
 `out/` 是生成目录，但不要把整个 `out/` 当垃圾随手清空；`out/assets/` 里通常放着复用的大型资产。重打包优先用：
 
 ```bash
-scripts/package-all.sh --version 0.1.3 --clean-output
+scripts/package-all.sh --version 0.1.4 --clean-output
 ```
 
 不要把 `out/` 里的旧 zip 当成最新发布物；每次发布前都要重新生成、校验 zip 内容并记录 sha256。

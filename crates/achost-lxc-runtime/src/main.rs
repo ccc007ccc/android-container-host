@@ -5,7 +5,8 @@ use sha2::{Digest, Sha256, Sha512};
 use std::env;
 use std::ffi::{CString, OsStr};
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{ErrorKind, Read};
+use std::net::Ipv4Addr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
@@ -935,6 +936,7 @@ fn import_rootfs(config: &LxcConfig, args: &ImportArgs) -> Result<ContainerMetad
             init_cmd: default_init_cmd(&rootfs),
             created_at_unix: unix_now(),
         };
+        ensure_guest_network_config(&rootfs, &container_network_settings(config, &args.name))?;
         let config_text = container_config_text(config, &metadata);
         fs::write(temp_dir.join("config"), config_text)
             .map_err(|error| format!("write container config: {error}"))?;
@@ -959,12 +961,16 @@ fn import_rootfs(config: &LxcConfig, args: &ImportArgs) -> Result<ContainerMetad
 }
 
 fn container_config_text(config: &LxcConfig, metadata: &ContainerMetadata) -> String {
+    let network = container_network_settings(config, &metadata.name);
     let mut text = format!(
-        "lxc.include = {}/default.conf\nlxc.rootfs.path = dir:{}\nlxc.uts.name = {}\nlxc.log.file = {}\nlxc.log.level = INFO\n",
+        "lxc.include = {}/default.conf\nlxc.rootfs.path = dir:{}\nlxc.uts.name = {}\nlxc.log.file = {}\nlxc.log.level = INFO\nlxc.net.0.ipv4.address = {}/{}\nlxc.net.0.ipv4.gateway = {}\n",
         config.lxc_etc.display(),
         metadata.rootfs,
         metadata.name,
-        config.container_log(&metadata.name).display()
+        config.container_log(&metadata.name).display(),
+        network.address,
+        network.prefix,
+        network.gateway
     );
     if let Some(init_cmd) = &metadata.init_cmd {
         text.push_str("lxc.init.cmd = ");
@@ -972,6 +978,55 @@ fn container_config_text(config: &LxcConfig, metadata: &ContainerMetadata) -> St
         text.push('\n');
     }
     text
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ContainerNetworkSettings {
+    address: Ipv4Addr,
+    gateway: Ipv4Addr,
+    prefix: u8,
+    dns: Vec<Ipv4Addr>,
+}
+
+fn container_network_settings(config: &LxcConfig, name: &str) -> ContainerNetworkSettings {
+    let (base, prefix) =
+        parse_ipv4_cidr(&config.subnet).unwrap_or((Ipv4Addr::new(172, 32, 0, 0), 16));
+    let mut octets = base.octets();
+    octets[3] = 1;
+    let gateway = Ipv4Addr::from(octets);
+    let hash = stable_name_hash(name);
+    let mut address = octets;
+    address[2] = ((hash / 253) % 253 + 1) as u8;
+    address[3] = (hash % 253 + 2) as u8;
+    if Ipv4Addr::from(address) == gateway {
+        address[3] = 2;
+    }
+    ContainerNetworkSettings {
+        address: Ipv4Addr::from(address),
+        gateway,
+        prefix,
+        dns: vec![Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)],
+    }
+}
+
+fn parse_ipv4_cidr(value: &str) -> Option<(Ipv4Addr, u8)> {
+    let (addr, prefix) = value.split_once('/')?;
+    let addr = addr.parse().ok()?;
+    let prefix = prefix.parse().ok()?;
+    if prefix <= 32 {
+        Some((addr, prefix))
+    } else {
+        None
+    }
+}
+
+fn stable_name_hash(value: &str) -> u32 {
+    let mut hash = 2166136261u32;
+    for byte in value.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(16777619);
+    }
+    hash
 }
 
 fn default_init_cmd(rootfs: &Path) -> Option<String> {
@@ -1200,16 +1255,8 @@ fn container_status(config: &LxcConfig, name: &str) -> Result<ContainerStatus, S
     if !container_dir.exists() {
         return Err(format!("container not found: {name}"));
     }
-    let metadata = read_container_metadata(config, name).unwrap_or_else(|| ContainerMetadata {
-        name: name.to_string(),
-        distro: "unknown".to_string(),
-        release: "unknown".to_string(),
-        arch: "unknown".to_string(),
-        rootfs: config.container_rootfs(name).display().to_string(),
-        rootfs_sha256: None,
-        init_cmd: None,
-        created_at_unix: 0,
-    });
+    let metadata = read_container_metadata(config, name)
+        .unwrap_or_else(|| fallback_container_metadata(config, name));
     let info = lxc_info(config, name).unwrap_or_else(|_| LxcInfo {
         state: "UNKNOWN".to_string(),
         pid: None,
@@ -1232,6 +1279,70 @@ fn container_status(config: &LxcConfig, name: &str) -> Result<ContainerStatus, S
 fn read_container_metadata(config: &LxcConfig, name: &str) -> Option<ContainerMetadata> {
     let text = fs::read_to_string(config.container_metadata(name)).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+fn fallback_container_metadata(config: &LxcConfig, name: &str) -> ContainerMetadata {
+    let rootfs = config.container_rootfs(name);
+    let (distro, release) =
+        infer_os_release(&rootfs).unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
+    ContainerMetadata {
+        name: name.to_string(),
+        distro,
+        release,
+        arch: host_arch_label(),
+        rootfs: rootfs.display().to_string(),
+        rootfs_sha256: None,
+        init_cmd: default_init_cmd(&rootfs),
+        created_at_unix: 0,
+    }
+}
+
+fn infer_os_release(rootfs: &Path) -> Option<(String, String)> {
+    let text = fs::read_to_string(rootfs.join("etc/os-release")).ok()?;
+    let mut distro = String::new();
+    let mut release = String::new();
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = unquote_os_release_value(value.trim());
+        match key {
+            "ID" => distro = value,
+            "NAME" if distro.is_empty() => distro = value,
+            "VERSION_ID" => release = value,
+            "VERSION_CODENAME" if release.is_empty() => release = value,
+            _ => {}
+        }
+    }
+    if distro.is_empty() && release.is_empty() {
+        None
+    } else {
+        if distro.is_empty() {
+            distro = "unknown".to_string();
+        }
+        if release.is_empty() {
+            release = "unknown".to_string();
+        }
+        Some((distro, release))
+    }
+}
+
+fn unquote_os_release_value(value: &str) -> String {
+    let value = value.trim();
+    if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+        value[1..value.len() - 1]
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\")
+    } else {
+        value.to_string()
+    }
+}
+
+fn host_arch_label() -> String {
+    match env::consts::ARCH {
+        "aarch64" => "arm64".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn parse_toggle(value: &str) -> Option<bool> {
@@ -1741,8 +1852,137 @@ fn lxc_state_label(config: &LxcConfig, name: &str) -> String {
     }
 }
 
+fn ensure_container_network(config: &LxcConfig, name: &str) -> Result<(), String> {
+    let settings = container_network_settings(config, name);
+    let path = config.container_config(name);
+    let text =
+        fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    let text = upsert_lxc_config_value(
+        &text,
+        "lxc.net.0.ipv4.address",
+        &format!("{}/{}", settings.address, settings.prefix),
+    );
+    let text = upsert_lxc_config_value(
+        &text,
+        "lxc.net.0.ipv4.gateway",
+        &settings.gateway.to_string(),
+    );
+    fs::write(&path, text).map_err(|error| format!("write {}: {error}", path.display()))?;
+    ensure_guest_network_config(&config.container_rootfs(name), &settings)
+}
+
+fn upsert_lxc_config_value(text: &str, key: &str, value: &str) -> String {
+    let prefix = format!("{key} ");
+    let mut lines: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with(&prefix))
+        .collect();
+    let mut output = String::new();
+    for line in lines.drain(..) {
+        output.push_str(line);
+        output.push('\n');
+    }
+    output.push_str(key);
+    output.push_str(" = ");
+    output.push_str(value);
+    output.push('\n');
+    output
+}
+
+fn ensure_guest_network_config(
+    rootfs: &Path,
+    settings: &ContainerNetworkSettings,
+) -> Result<(), String> {
+    write_guest_resolv_conf(rootfs, settings)?;
+    write_guest_netplan(rootfs, settings)?;
+    write_guest_systemd_network(rootfs, settings)?;
+    Ok(())
+}
+
+fn write_guest_resolv_conf(
+    rootfs: &Path,
+    settings: &ContainerNetworkSettings,
+) -> Result<(), String> {
+    let path = rootfs.join("etc/resolv.conf");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", parent.display()))?;
+    }
+    if fs::symlink_metadata(&path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fs::remove_file(&path).map_err(|error| format!("remove {}: {error}", path.display()))?;
+    }
+    let mut text = String::new();
+    for dns in &settings.dns {
+        text.push_str("nameserver ");
+        text.push_str(&dns.to_string());
+        text.push('\n');
+    }
+    fs::write(&path, text).map_err(|error| format!("write {}: {error}", path.display()))
+}
+
+fn write_guest_netplan(rootfs: &Path, settings: &ContainerNetworkSettings) -> Result<(), String> {
+    let netplan = rootfs.join("etc/netplan");
+    if !netplan.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(&netplan)
+        .map_err(|error| format!("create {}: {error}", netplan.display()))?;
+    let path = if netplan.join("10-lxc.yaml").exists() {
+        netplan.join("10-lxc.yaml")
+    } else {
+        netplan.join("10-achost-lxc.yaml")
+    };
+    let dns = settings
+        .dns
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let text = format!(
+        "network:\n  version: 2\n  renderer: networkd\n  ethernets:\n    eth0:\n      dhcp4: false\n      addresses: [{}/{}]\n      routes:\n        - to: default\n          via: {}\n      nameservers:\n        addresses: [{}]\n",
+        settings.address, settings.prefix, settings.gateway, dns
+    );
+    fs::write(&path, text).map_err(|error| format!("write {}: {error}", path.display()))
+}
+
+fn write_guest_systemd_network(
+    rootfs: &Path,
+    settings: &ContainerNetworkSettings,
+) -> Result<(), String> {
+    if !rootfs.join("etc/systemd").exists() {
+        return Ok(());
+    }
+    let dir = rootfs.join("etc/systemd/network");
+    fs::create_dir_all(&dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
+    let mut text = format!(
+        "[Match]\nName=eth0\n\n[Network]\nAddress={}/{}\nGateway={}\n",
+        settings.address, settings.prefix, settings.gateway
+    );
+    for dns in &settings.dns {
+        text.push_str("DNS=");
+        text.push_str(&dns.to_string());
+        text.push('\n');
+    }
+    let path = dir.join("10-achost-lxc.network");
+    fs::write(&path, text).map_err(|error| format!("write {}: {error}", path.display()))
+}
+
+fn prepare_container_log(config: &LxcConfig, name: &str) -> Result<PathBuf, String> {
+    let log = config.container_log(name);
+    if let Some(parent) = log.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", parent.display()))?;
+    }
+    File::create(&log).map_err(|error| format!("truncate {}: {error}", log.display()))?;
+    Ok(log)
+}
+
 fn start_container(config: &LxcConfig, name: &str) -> Result<(), String> {
     validate_existing_container(config, name)?;
+    ensure_container_network(config, name)?;
     if lxc_info(config, name).is_ok_and(|info| info.state == "RUNNING") {
         println!("container_state=RUNNING");
         return Ok(());
@@ -1750,11 +1990,7 @@ fn start_container(config: &LxcConfig, name: &str) -> Result<(), String> {
     if run_prepare_bridge() != 0 {
         return Err("prepare-bridge failed".to_string());
     }
-    let log = config.container_log(name);
-    if let Some(parent) = log.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("create {}: {error}", parent.display()))?;
-    }
+    let log = prepare_container_log(config, name)?;
     let result = run_lxc_capture(
         config,
         "lxc-start",
@@ -1850,16 +2086,17 @@ fn destroy_container(config: &LxcConfig, name: &str) -> Result<(), String> {
 
 fn exec_container(config: &LxcConfig, name: &str, command: &[String]) -> Result<i32, String> {
     validate_existing_container(config, name)?;
-    let program = find_lxc_binary(config, "lxc-attach")?;
-    let mut cmd = Command::new(program);
-    apply_lxc_env(config, &mut cmd);
-    cmd.arg("-P")
-        .arg(&config.lxc_containers)
-        .arg("-n")
-        .arg(name)
-        .arg("--")
-        .args(command)
-        .stdin(Stdio::inherit())
+    let mut args = vec![
+        "-P".to_string(),
+        path_string(&config.lxc_containers),
+        "-n".to_string(),
+        name.to_string(),
+        "--".to_string(),
+    ];
+    args.extend(command.iter().cloned());
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut cmd = lxc_command(config, "lxc-attach", &arg_refs)?;
+    cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     let status = cmd
@@ -1912,8 +2149,13 @@ fn run_guest_capture(
 fn read_container_logs(config: &LxcConfig, name: &str, lines: usize) -> Result<String, String> {
     validate_existing_container(config, name)?;
     let path = config.container_log(name);
-    let text =
-        fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(format!("no log file: {}\n", path.display()));
+        }
+        Err(error) => return Err(format!("read {}: {error}", path.display())),
+    };
     Ok(last_lines(&text, lines))
 }
 
@@ -2590,6 +2832,58 @@ mod tests {
     }
 
     #[test]
+    fn infers_raw_container_metadata_from_os_release() {
+        let dir = temp_test_dir("fallback-metadata");
+        let config = temp_test_config(&dir);
+        let rootfs_etc = config.container_rootfs("raw").join("etc");
+        fs::create_dir_all(&rootfs_etc).unwrap();
+        fs::write(
+            rootfs_etc.join("os-release"),
+            "ID=ubuntu\nVERSION_ID=\"26.04\"\nPRETTY_NAME=\"Ubuntu 26.04 LTS\"\n",
+        )
+        .unwrap();
+
+        let metadata = fallback_container_metadata(&config, "raw");
+
+        assert_eq!(metadata.distro, "ubuntu");
+        assert_eq!(metadata.release, "26.04");
+        assert_eq!(metadata.arch, host_arch_label());
+        assert_eq!(
+            metadata.rootfs,
+            config.container_rootfs("raw").display().to_string()
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_container_log_truncates_previous_log() {
+        let dir = temp_test_dir("log-truncate");
+        let config = temp_test_config(&dir);
+        fs::create_dir_all(&config.lxc_log).unwrap();
+        let log = config.container_log("demo");
+        fs::write(&log, "old failure\n").unwrap();
+
+        let prepared = prepare_container_log(&config, "demo").unwrap();
+
+        assert_eq!(prepared, log);
+        assert_eq!(fs::read_to_string(&prepared).unwrap(), "");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_container_log_returns_message() {
+        let dir = temp_test_dir("missing-log");
+        let config = temp_test_config(&dir);
+        fs::create_dir_all(config.container_dir("demo")).unwrap();
+
+        let text = read_container_logs(&config, "demo", 20).unwrap();
+
+        assert!(text.contains("no log file:"));
+        assert!(text.contains("demo.log"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn rejects_mismatched_rootfs_sha256_before_import() {
         let dir = temp_test_dir("import-sha-mismatch");
         fs::create_dir_all(&dir).unwrap();
@@ -2657,7 +2951,48 @@ mod tests {
         assert!(text.contains("lxc.include = /module/achost/etc/lxc/default.conf"));
         assert!(text.contains("lxc.rootfs.path = dir:/data/adb/achost/lxc/containers/demo/rootfs"));
         assert!(text.contains("lxc.uts.name = demo"));
+        assert!(text.contains("lxc.net.0.ipv4.address = "));
+        assert!(text.contains("/16"));
+        assert!(text.contains("lxc.net.0.ipv4.gateway = 172.32.0.1"));
         assert!(text.contains("lxc.init.cmd = /bin/sleep 3600"));
+    }
+
+    #[test]
+    fn repairs_raw_container_network_files() {
+        let dir = temp_test_dir("container-network");
+        let config = temp_test_config(&dir);
+        let container_dir = config.container_dir("raw");
+        let rootfs = config.container_rootfs("raw");
+        fs::create_dir_all(rootfs.join("etc/netplan")).unwrap();
+        fs::create_dir_all(rootfs.join("etc/systemd")).unwrap();
+        fs::create_dir_all(rootfs.join("run/systemd/resolve")).unwrap();
+        fs::write(
+            container_dir.join("config"),
+            "lxc.net.0.type = veth\nlxc.net.0.link = lxcbr0\n",
+        )
+        .unwrap();
+        fs::write(rootfs.join("etc/netplan/10-lxc.yaml"), "dhcp4: true\n").unwrap();
+        symlink(
+            "../run/systemd/resolve/stub-resolv.conf",
+            rootfs.join("etc/resolv.conf"),
+        )
+        .unwrap();
+
+        ensure_container_network(&config, "raw").unwrap();
+
+        let lxc_config = fs::read_to_string(container_dir.join("config")).unwrap();
+        assert!(lxc_config.contains("lxc.net.0.ipv4.address = "));
+        assert!(lxc_config.contains("lxc.net.0.ipv4.gateway = 172.32.0.1"));
+        let resolv = fs::read_to_string(rootfs.join("etc/resolv.conf")).unwrap();
+        assert!(resolv.contains("nameserver 1.1.1.1"));
+        assert!(!path_is_symlink(&rootfs.join("etc/resolv.conf")));
+        let netplan = fs::read_to_string(rootfs.join("etc/netplan/10-lxc.yaml")).unwrap();
+        assert!(netplan.contains("dhcp4: false"));
+        assert!(netplan.contains("nameservers:"));
+        let networkd =
+            fs::read_to_string(rootfs.join("etc/systemd/network/10-achost-lxc.network")).unwrap();
+        assert!(networkd.contains("Gateway=172.32.0.1"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

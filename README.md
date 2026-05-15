@@ -48,7 +48,7 @@ bin/achost verify-config \
 npm install --prefix webui
 npm run build --prefix webui
 
-scripts/package-all.sh --version 0.1.3
+scripts/package-all.sh --version 0.1.4
 ```
 
 脚本会分别生成 base/Docker/LXC 模块、校验 zip 内容并写入 `SHA256SUMS.txt`。Docker/LXC 模块需要 Android/arm64 用户态资产；默认从 `out/assets/` 读取，完整说明见 [`docs/build-and-package.md`](docs/build-and-package.md)。

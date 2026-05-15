@@ -434,6 +434,19 @@ fn mount_call(
     Ok(())
 }
 
+fn detach_mount_if_present(path: &str) -> io::Result<()> {
+    let path_c = cstring(path)?;
+    let rc = unsafe { libc::umount2(path_c.as_ptr(), libc::MNT_DETACH) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let err = io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(libc::EINVAL) | Some(libc::ENOENT) => Ok(()),
+        _ => Err(err),
+    }
+}
+
 fn make_private_mount_namespace() -> io::Result<()> {
     let unshare_rc = unsafe { libc::syscall(libc::SYS_unshare, libc::CLONE_NEWNS) };
     if unshare_rc < 0 {
@@ -535,6 +548,9 @@ fn mount_native_cgroup_controller(cgroup_root: &str, controller: &str) -> io::Re
 fn setup_native_cgroups(native_root: &str) -> io::Result<()> {
     let cgroup_root = join_root(native_root, "/sys/fs/cgroup");
     ensure_directory(&cgroup_root, 0o755)?;
+    if let Err(err) = detach_mount_if_present(&cgroup_root) {
+        eprintln!("warning: unable to detach native cgroup root: {}", err);
+    }
     mount_call(
         Some("tmpfs"),
         &cgroup_root,
@@ -548,6 +564,23 @@ fn setup_native_cgroups(native_root: &str) -> io::Result<()> {
         mount_native_cgroup_controller(&cgroup_root, controller)?;
     }
     Ok(())
+}
+
+fn detach_native_android_cgroups(native_root: &str) {
+    for path in [
+        "/acct",
+        "/dev/blkio",
+        "/dev/cpuctl",
+        "/dev/cpuset",
+        "/dev/stune",
+        "/dev/achost-cgroup/devices",
+        "/dev/memcg",
+    ] {
+        let target = join_root(native_root, path);
+        if let Err(err) = detach_mount_if_present(&target) {
+            eprintln!("warning: unable to detach native {}: {}", path, err);
+        }
+    }
 }
 
 fn setup_native_run(native_root: &str) -> io::Result<()> {
@@ -631,10 +664,10 @@ fn setup_native_root(native_root: &str) -> io::Result<()> {
         bind_native_path(native_root, path, required)?;
     }
     setup_native_cgroups(native_root)?;
-    // Keep Android cgroup mounts after the private tree so containerd selects /sys/fs/cgroup.
     for (path, required) in [("/dev", true), ("/acct", false)] {
         bind_native_path(native_root, path, required)?;
     }
+    detach_native_android_cgroups(native_root);
     setup_native_run(native_root)?;
     eprintln!(
         "achost-supervise: native root={} private-run=ready private-cgroup=ready",
