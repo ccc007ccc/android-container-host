@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from . import __version__, __version_code__
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_ROOT = PROJECT_ROOT / "runtime" / "android"
 SCRIPT_ROOT = PROJECT_ROOT / "scripts"
@@ -65,6 +67,8 @@ LXC_REQUIRED_BINARIES = (
     "lxc-checkconfig",
 )
 LXC_OPTIONAL_BINARIES = ("lxc-create", "lxc-copy", "lxc-console")
+LXC_DOWNLOAD_TOOL_WRAPPERS = ("wget", "xz", "unxz")
+LXC_DOWNLOAD_TEMPLATE_REL = "achost/lxc/share/lxc/templates/lxc-download"
 COMPOSE_ASSET_NAMES = ("docker-compose", "docker-compose-linux-aarch64", "docker-compose-linux-arm64")
 COMPOSE_PLUGIN_REL = "achost/etc/docker/cli-plugins/docker-compose"
 COMPOSE_STANDALONE_REL = "achost/bin/docker-compose"
@@ -352,6 +356,8 @@ def generate_runtime_package(
         lxc_report, lxc_files = install_lxc_asset(lxc_asset, root, lxc_sha256)
         assets["lxc"] = lxc_report
         files.extend(lxc_files)
+    if mode == "manual" or spec.include_lxc:
+        files.extend(write_lxc_download_tool_wrappers(root))
     if mode == "kernelsu-module" and spec.include_webui:
         files.extend(install_webui(root, spec))
     entrypoints = write_mode_files(root, mode, spec, files, start_docker_on_boot=start_docker_on_boot)
@@ -1100,6 +1106,8 @@ def install_lxc_asset(asset: str | Path, root: Path, expected_sha256: str | None
             executable = lxc_file_is_executable(rel_path)
             mode = 0o755 if executable else (member.mode & 0o777 or 0o644)
             copy_tar_member(archive, member, dst, mode)
+            if rel_path == LXC_DOWNLOAD_TEMPLATE_REL:
+                patch_lxc_download_template(dst)
             extracted_paths.append(rel_path)
             if rel_path.startswith("achost/lxc/bin/"):
                 name = PurePosixPath(rel_path).name
@@ -1121,6 +1129,38 @@ def install_lxc_asset(asset: str | Path, root: Path, expected_sha256: str | None
         "files": {name: extracted_binaries[name] for name in sorted(extracted_binaries)},
         "paths": sorted(extracted_paths),
     }, files
+
+
+def write_lxc_download_tool_wrappers(root: Path) -> list[RuntimeFile]:
+    files: list[RuntimeFile] = []
+    for name in LXC_DOWNLOAD_TOOL_WRAPPERS:
+        rel_path = f"achost/lxc/bin/{name}"
+        dst = root / rel_path
+        if dst.exists():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(lxc_busybox_tool_wrapper(name))
+        os.chmod(dst, 0o755)
+        files.append(RuntimeFile(rel_path, None, True, category="lxc"))
+    return files
+
+
+def lxc_busybox_tool_wrapper(name: str) -> str:
+    return f"""#!/system/bin/sh
+set -eu
+if command -v busybox >/dev/null 2>&1; then
+    exec busybox {name} "$@"
+fi
+printf 'ACHost LXC: missing busybox applet {name}\n' >&2
+exit 127
+"""
+
+
+def patch_lxc_download_template(path: Path) -> None:
+    text = path.read_text()
+    text = text.replace('DOWNLOAD_VALIDATE="true"', 'DOWNLOAD_VALIDATE="${DOWNLOAD_VALIDATE:-false}"')
+    path.write_text(text)
+    os.chmod(path, 0o755)
 
 
 def resolve_asset_file(asset: str | Path) -> Path:
@@ -1177,6 +1217,289 @@ def create_runtime_zip(root: str | Path, zip_output: str | Path | None = None) -
                 continue
             archive.write(path, path.relative_to(root_path).as_posix())
     return zip_path
+
+
+def validate_runtime_package(
+    package_root: str | Path,
+    module_target: str,
+    zip_path: str | Path | None = None,
+    release: bool = False,
+) -> dict[str, Any]:
+    report = build_runtime_validation_report(package_root, module_target, zip_path, release=release)
+    if report["errors"]:
+        details = "\n".join(f"  - {error}" for error in report["errors"])
+        raise ValueError(f"runtime package validation failed:\n{details}")
+    return report
+
+
+def build_runtime_validation_report(
+    package_root: str | Path,
+    module_target: str,
+    zip_path: str | Path | None = None,
+    release: bool = False,
+) -> dict[str, Any]:
+    if module_target not in ("base", "docker", "lxc"):
+        raise ValueError(f"unsupported validation module target: {module_target}")
+    root = Path(package_root).expanduser().resolve()
+    errors: list[str] = []
+    if not root.is_dir():
+        errors.append(f"package root not found: {root}")
+        return validation_report(root, module_target, zip_path, release, {}, set(), set(), errors)
+
+    stage_entries = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
+    manifest = read_manifest(root, errors)
+    zip_entries: set[str] = set()
+    zip_infos: dict[str, zipfile.ZipInfo] = {}
+    if zip_path is not None:
+        zip_entries, zip_infos = read_zip_entries(zip_path, errors)
+
+    check_release_entries(module_target, root, manifest, stage_entries, zip_entries, zip_infos, zip_path is not None, errors)
+    if release:
+        check_release_manifest(module_target, manifest, errors)
+        check_forbidden_release_entries(module_target, stage_entries | zip_entries, errors)
+        check_unsafe_entries(stage_entries | zip_entries, errors)
+    return validation_report(root, module_target, zip_path, release, manifest, stage_entries, zip_entries, errors)
+
+
+def validation_report(
+    root: Path,
+    module_target: str,
+    zip_path: str | Path | None,
+    release: bool,
+    manifest: dict[str, Any],
+    stage_entries: set[str],
+    zip_entries: set[str],
+    errors: list[str],
+) -> dict[str, Any]:
+    return {
+        "ok": not errors,
+        "module_target": module_target,
+        "release": release,
+        "package_root": str(root),
+        "zip": str(Path(zip_path).expanduser().resolve()) if zip_path is not None else None,
+        "module_id": manifest.get("module_id"),
+        "stage_entries": len(stage_entries),
+        "zip_entries": len(zip_entries),
+        "errors": errors,
+    }
+
+
+def read_manifest(root: Path, errors: list[str]) -> dict[str, Any]:
+    manifest_path = root / "manifest.json"
+    if not manifest_path.is_file():
+        errors.append("missing manifest.json")
+        return {}
+    try:
+        data = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError as error:
+        errors.append(f"manifest.json is not valid JSON: {error}")
+        return {}
+    if not isinstance(data, dict):
+        errors.append("manifest.json is not an object")
+        return {}
+    return data
+
+
+def read_zip_entries(zip_path: str | Path, errors: list[str]) -> tuple[set[str], dict[str, zipfile.ZipInfo]]:
+    path = Path(zip_path).expanduser().resolve()
+    if not path.is_file():
+        errors.append(f"zip not found: {path}")
+        return set(), {}
+    entries: set[str] = set()
+    infos: dict[str, zipfile.ZipInfo] = {}
+    try:
+        with zipfile.ZipFile(path) as archive:
+            for info in archive.infolist():
+                name = info.filename.rstrip("/")
+                if not name:
+                    continue
+                entries.add(name)
+                infos[name] = info
+                parts = PurePosixPath(name).parts
+                if PurePosixPath(name).is_absolute() or ".." in parts:
+                    errors.append(f"unsafe zip entry: {name}")
+    except zipfile.BadZipFile as error:
+        errors.append(f"zip is not readable: {error}")
+    return entries, infos
+
+
+def check_release_entries(
+    module_target: str,
+    root: Path,
+    manifest: dict[str, Any],
+    stage_entries: set[str],
+    zip_entries: set[str],
+    zip_infos: dict[str, zipfile.ZipInfo],
+    check_zip: bool,
+    errors: list[str],
+) -> None:
+    required = release_required_entries(module_target)
+    manifest_entries = manifest_file_entries(manifest)
+    for entry in required:
+        if entry not in stage_entries:
+            errors.append(f"missing package entry: {entry}")
+        if manifest_entries and entry not in manifest_entries:
+            errors.append(f"missing manifest file entry: {entry}")
+        if check_zip and entry not in zip_entries:
+            errors.append(f"missing zip entry: {entry}")
+    for entry in release_executable_entries(module_target):
+        if entry in stage_entries and not os.access(root / entry, os.X_OK):
+            errors.append(f"package entry is not executable: {entry}")
+        if check_zip and entry in zip_infos:
+            mode = (zip_infos[entry].external_attr >> 16) & 0o777
+            if mode & 0o111 == 0:
+                errors.append(f"zip entry is not executable: {entry}")
+
+
+def manifest_file_entries(manifest: dict[str, Any]) -> set[str]:
+    files = manifest.get("files", [])
+    if not isinstance(files, list):
+        return set()
+    entries: set[str] = set()
+    for item in files:
+        if isinstance(item, dict) and isinstance(item.get("path"), str):
+            entries.add(item["path"])
+    return entries
+
+
+def check_release_manifest(module_target: str, manifest: dict[str, Any], errors: list[str]) -> None:
+    spec = MODULE_SPECS[module_target]
+    expected_assets = {
+        "base": (),
+        "docker": ("docker", "compose", "buildx", "buildkit"),
+        "lxc": ("lxc",),
+    }[module_target]
+    if manifest.get("module_target") != module_target:
+        errors.append(f"manifest module_target mismatch: expected {module_target} got {manifest.get('module_target')}")
+    if manifest.get("module_id") != spec.module_id:
+        errors.append(f"manifest module_id mismatch: expected {spec.module_id} got {manifest.get('module_id')}")
+    if manifest.get("requires") != list(spec.requires):
+        errors.append(f"manifest requires mismatch: expected {list(spec.requires)} got {manifest.get('requires')}")
+    assets = manifest.get("assets", {})
+    if not isinstance(assets, dict):
+        errors.append("manifest assets is not an object")
+        return
+    for name in expected_assets:
+        if not assets.get(name):
+            errors.append(f"manifest assets.{name} is missing")
+
+
+def release_required_entries(module_target: str) -> tuple[str, ...]:
+    common_module_entries = (
+        "module.prop",
+        "service.sh",
+        "customize.sh",
+        "post-fs-data.sh",
+        "uninstall.sh",
+        "manifest.json",
+    )
+    if module_target == "base":
+        return common_module_entries + (
+            "achost/etc/achost-runtime.conf",
+            "achost/etc/sysctl.d/99-container-host.conf",
+            "achost/bin/achost-container-env.sh",
+            "achost/bin/achost-container-validate.sh",
+            "achost/bin/runtime-net-debug.sh",
+            "achost/bin/runtime-test.sh",
+            "achost/bin/collect-logs.sh",
+            "achost/bin/achost-runtime-core",
+            "achost/bin/achost-supervise",
+        )
+    if module_target == "docker":
+        return common_module_entries + (
+            "webroot/index.html",
+            "achost/bin/achost-docker-runtime",
+            "achost/bin/achost-webui-api",
+            "achost/bin/achost-webui-api.sh",
+            *(f"achost/bin/{name}" for name in DOCKER_REQUIRED_BINARIES),
+            COMPOSE_STANDALONE_REL,
+            COMPOSE_PLUGIN_REL,
+            BUILDX_STANDALONE_REL,
+            BUILDX_PLUGIN_REL,
+            *(f"achost/bin/{name}" for name in BUILDKIT_REQUIRED_BINARIES),
+        )
+    return common_module_entries + (
+        "webroot/index.html",
+        "achost/bin/achost-lxc-runtime",
+        "achost/bin/achost-lxc-validate.sh",
+        "achost/bin/achost-webui-api",
+        "achost/bin/achost-webui-api.sh",
+        *(f"achost/lxc/bin/{name}" for name in LXC_REQUIRED_BINARIES),
+        *(f"achost/lxc/bin/{name}" for name in LXC_DOWNLOAD_TOOL_WRAPPERS),
+        LXC_DOWNLOAD_TEMPLATE_REL,
+    )
+
+
+def release_executable_entries(module_target: str) -> tuple[str, ...]:
+    entries = []
+    for entry in release_required_entries(module_target):
+        if entry.endswith(".sh") or entry.startswith("achost/bin/"):
+            entries.append(entry)
+        elif entry.startswith("achost/lxc/bin/"):
+            entries.append(entry)
+        elif entry.startswith("achost/etc/docker/cli-plugins/"):
+            entries.append(entry)
+        elif entry.startswith("achost/lxc/share/lxc/templates/lxc-"):
+            entries.append(entry)
+    return tuple(entries)
+
+
+def check_forbidden_release_entries(module_target: str, entries: set[str], errors: list[str]) -> None:
+    forbidden = {
+        "base": (
+            "webroot/",
+            "achost/bin/achost-docker-runtime",
+            "achost/bin/achost-lxc-runtime",
+            "achost/bin/achost-webui-api",
+            "achost/bin/docker",
+            "achost/lxc/",
+        ),
+        "docker": (
+            "achost/bin/achost-runtime-core",
+            "achost/bin/achost-supervise",
+            "achost/bin/achost-lxc-runtime",
+            "achost/lxc/",
+        ),
+        "lxc": (
+            "achost/bin/achost-runtime-core",
+            "achost/bin/achost-supervise",
+            "achost/bin/achost-docker-runtime",
+            "achost/bin/docker",
+            "achost/bin/dockerd",
+            "achost/etc/docker/",
+        ),
+    }[module_target]
+    for entry in sorted(entries):
+        for pattern in forbidden:
+            if entry == pattern.rstrip("/") or entry.startswith(pattern):
+                errors.append(f"forbidden {module_target} package entry: {entry}")
+                break
+
+
+def check_unsafe_entries(entries: set[str], errors: list[str]) -> None:
+    forbidden_prefixes = (".git/", "target/", "webui/node_modules/", "out/", "android-sshd/")
+    for entry in sorted(entries):
+        parts = PurePosixPath(entry).parts
+        if PurePosixPath(entry).is_absolute() or ".." in parts:
+            errors.append(f"unsafe package entry: {entry}")
+        for prefix in forbidden_prefixes:
+            if entry == prefix.rstrip("/") or entry.startswith(prefix):
+                errors.append(f"forbidden package entry: {entry}")
+                break
+
+
+def format_runtime_validation_report(report: dict[str, Any]) -> str:
+    lines = [
+        f"runtime package validation: {'OK' if report['ok'] else 'FAILED'}",
+        f"module_target: {report['module_target']}",
+        f"package_root: {report['package_root']}",
+    ]
+    if report.get("zip"):
+        lines.append(f"zip: {report['zip']}")
+    if report["errors"]:
+        lines.append("errors:")
+        lines.extend(f"  - {error}" for error in report["errors"])
+    return "\n".join(lines)
 
 
 def lxc_destination(name: str) -> str | None:
@@ -1312,8 +1635,8 @@ def module_prop(spec: ModuleSpec) -> str:
     requires = "".join(f"requires={item}\n" for item in spec.requires)
     return f"""id={spec.module_id}
 name={spec.name}
-version=0.1.1
-versionCode=2
+version={__version__}
+versionCode={__version_code__}
 author=ccc007
 {requires}description={spec.description}
 """

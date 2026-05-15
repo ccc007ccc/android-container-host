@@ -20,7 +20,13 @@ from .docker.moby_check_config import print_json as print_moby_json
 from .docker.moby_check_config import run_moby_check
 from .patch_apply import apply_patch_report, format_apply_report, format_patch_list, list_patch_report
 from .report import plan_markdown, to_json, write_plan_reports
-from .runtime_install import create_runtime_zip, format_runtime_install_report, generate_runtime_package
+from .runtime_install import (
+    create_runtime_zip,
+    format_runtime_install_report,
+    format_runtime_validation_report,
+    generate_runtime_package,
+    validate_runtime_package,
+)
 from .runtime_test import build_runtime_test_report, format_runtime_test_report
 from .verify_config import evaluate_config, format_human, has_required_failures, summarize_results
 
@@ -131,6 +137,14 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_install.add_argument("--zip", dest="zip_output", nargs="?", const="auto")
     runtime_install.add_argument("--json", action="store_true")
     runtime_install.set_defaults(func=cmd_runtime_install)
+
+    runtime_validate = subparsers.add_parser("runtime-validate", help="validate a generated runtime package")
+    runtime_validate.add_argument("--package-root", required=True)
+    runtime_validate.add_argument("--module-target", choices=("base", "docker", "lxc"), required=True)
+    runtime_validate.add_argument("--zip", dest="zip_output")
+    runtime_validate.add_argument("--release", action="store_true")
+    runtime_validate.add_argument("--json", action="store_true")
+    runtime_validate.set_defaults(func=cmd_runtime_validate)
 
     runtime_test = subparsers.add_parser("runtime-test", help="print Android runtime test command")
     runtime_test.add_argument("--package-root", default="/data/adb/achost")
@@ -279,6 +293,20 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         print(to_json(report))
     else:
         print(format_runtime_install_report(report))
+    return 0
+
+
+def cmd_runtime_validate(args: argparse.Namespace) -> int:
+    report = validate_runtime_package(
+        args.package_root,
+        args.module_target,
+        zip_path=args.zip_output,
+        release=args.release,
+    )
+    if args.json:
+        print(to_json(report))
+    else:
+        print(format_runtime_validation_report(report))
     return 0
 
 

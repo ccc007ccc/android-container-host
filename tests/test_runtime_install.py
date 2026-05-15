@@ -20,10 +20,12 @@ from achost.runtime_install import (
     COMPOSE_PLUGIN_REL,
     COMPOSE_STANDALONE_REL,
     DOCKER_REQUIRED_BINARIES,
+    LXC_DOWNLOAD_TOOL_WRAPPERS,
     LXC_REQUIRED_BINARIES,
     STALE_RUNTIME_ENTRYPOINTS,
     create_runtime_zip,
     generate_runtime_package,
+    validate_runtime_package,
 )
 
 
@@ -616,6 +618,132 @@ class RuntimeInstallTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unsupported docker runtime mode"):
                 generate_runtime_package(Path(tmp) / "manual-chroot", docker_runtime_mode="chroot")
 
+    def test_release_validator_accepts_complete_base_module(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "base"
+            generate_runtime_package(output, mode="kernelsu-module", module_target="base")
+            zip_path = create_runtime_zip(output)
+
+            report = validate_runtime_package(output, "base", zip_path=zip_path, release=True)
+
+            self.assertTrue(report["ok"])
+
+    def test_release_validator_accepts_complete_docker_module(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            docker_asset = tmp_path / "docker-static-aarch64.tgz"
+            compose_asset = tmp_path / "docker-compose-linux-aarch64"
+            buildx_asset = tmp_path / "buildx-v0.test.linux-arm64"
+            buildkit_asset = tmp_path / "buildkit-linux-arm64.tar.gz"
+            self.write_docker_asset(docker_asset)
+            self.write_single_binary(compose_asset, "compose test")
+            self.write_single_binary(buildx_asset, "buildx test")
+            self.write_buildkit_asset(buildkit_asset)
+            output = tmp_path / "docker"
+
+            generate_runtime_package(
+                output,
+                mode="kernelsu-module",
+                module_target="docker",
+                docker_asset=docker_asset,
+                compose_asset=compose_asset,
+                buildx_asset=buildx_asset,
+                buildkit_asset=buildkit_asset,
+            )
+            zip_path = create_runtime_zip(output)
+            report = validate_runtime_package(output, "docker", zip_path=zip_path, release=True)
+
+            self.assertTrue(report["ok"])
+            with zipfile.ZipFile(zip_path) as archive:
+                names = set(archive.namelist())
+            self.assertIn(COMPOSE_PLUGIN_REL, names)
+            self.assertIn(COMPOSE_STANDALONE_REL, names)
+            self.assertIn(BUILDX_PLUGIN_REL, names)
+            self.assertIn(BUILDX_STANDALONE_REL, names)
+            self.assertIn("achost/bin/buildctl", names)
+            self.assertIn("achost/bin/buildkitd", names)
+
+    def test_release_validator_rejects_docker_module_without_compose(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            docker_asset = tmp_path / "docker-static-aarch64.tgz"
+            buildx_asset = tmp_path / "buildx-v0.test.linux-arm64"
+            buildkit_asset = tmp_path / "buildkit-linux-arm64.tar.gz"
+            self.write_docker_asset(docker_asset)
+            self.write_single_binary(buildx_asset, "buildx test")
+            self.write_buildkit_asset(buildkit_asset)
+            output = tmp_path / "docker"
+
+            generate_runtime_package(
+                output,
+                mode="kernelsu-module",
+                module_target="docker",
+                docker_asset=docker_asset,
+                buildx_asset=buildx_asset,
+                buildkit_asset=buildkit_asset,
+            )
+            zip_path = create_runtime_zip(output)
+
+            with self.assertRaisesRegex(ValueError, "assets.compose"):
+                validate_runtime_package(output, "docker", zip_path=zip_path, release=True)
+
+    def test_release_validator_rejects_docker_module_without_buildkit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            docker_asset = tmp_path / "docker-static-aarch64.tgz"
+            compose_asset = tmp_path / "docker-compose-linux-aarch64"
+            buildx_asset = tmp_path / "buildx-v0.test.linux-arm64"
+            self.write_docker_asset(docker_asset)
+            self.write_single_binary(compose_asset, "compose test")
+            self.write_single_binary(buildx_asset, "buildx test")
+            output = tmp_path / "docker"
+
+            generate_runtime_package(
+                output,
+                mode="kernelsu-module",
+                module_target="docker",
+                docker_asset=docker_asset,
+                compose_asset=compose_asset,
+                buildx_asset=buildx_asset,
+            )
+            zip_path = create_runtime_zip(output)
+
+            with self.assertRaisesRegex(ValueError, "assets.buildkit"):
+                validate_runtime_package(output, "docker", zip_path=zip_path, release=True)
+
+    def test_release_validator_accepts_complete_lxc_module(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            asset = tmp_path / "lxc-android-aarch64.tar.gz"
+            self.write_lxc_asset(asset)
+            output = tmp_path / "lxc"
+
+            generate_runtime_package(output, mode="kernelsu-module", module_target="lxc", lxc_asset=asset)
+            zip_path = create_runtime_zip(output)
+            report = validate_runtime_package(output, "lxc", zip_path=zip_path, release=True)
+
+            self.assertTrue(report["ok"])
+            with zipfile.ZipFile(zip_path) as archive:
+                names = set(archive.namelist())
+            self.assertIn("achost/lxc/share/lxc/templates/lxc-download", names)
+            for name in LXC_DOWNLOAD_TOOL_WRAPPERS:
+                self.assertIn(f"achost/lxc/bin/{name}", names)
+            template = (output / "achost" / "lxc" / "share" / "lxc" / "templates" / "lxc-download").read_text()
+            self.assertIn('DOWNLOAD_VALIDATE="${DOWNLOAD_VALIDATE:-false}"', template)
+
+    def test_release_validator_rejects_lxc_module_without_download_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            asset = tmp_path / "lxc-android-aarch64.tar.gz"
+            self.write_lxc_asset(asset, include_template=False)
+            output = tmp_path / "lxc"
+
+            generate_runtime_package(output, mode="kernelsu-module", module_target="lxc", lxc_asset=asset)
+            zip_path = create_runtime_zip(output)
+
+            with self.assertRaisesRegex(ValueError, "lxc-download"):
+                validate_runtime_package(output, "lxc", zip_path=zip_path, release=True)
+
     def test_docker_runtime_stop_uses_achost_scoped_process_cleanup(self):
         source = (Path(__file__).resolve().parents[1] / "crates" / "achost-docker-runtime" / "src" / "main.rs").read_text()
 
@@ -761,6 +889,11 @@ class RuntimeInstallTest(unittest.TestCase):
             template = output / "achost" / "lxc" / "share" / "lxc" / "templates" / "lxc-download"
             self.assertTrue(template.exists())
             self.assertTrue(template.stat().st_mode & stat.S_IXUSR)
+            self.assertIn('DOWNLOAD_VALIDATE="${DOWNLOAD_VALIDATE:-false}"', template.read_text())
+            for name in LXC_DOWNLOAD_TOOL_WRAPPERS:
+                wrapper = output / "achost" / "lxc" / "bin" / name
+                self.assertTrue(wrapper.exists(), name)
+                self.assertTrue(wrapper.stat().st_mode & stat.S_IXUSR, name)
             asset_entries = [item for item in manifest["files"] if item.get("asset") == "lxc"]
             binary_entries = [item for item in asset_entries if Path(item["path"]).parent.as_posix() == "achost/lxc/bin"]
             template_entries = [item for item in asset_entries if item["path"] == "achost/lxc/share/lxc/templates/lxc-download"]
@@ -828,7 +961,7 @@ class RuntimeInstallTest(unittest.TestCase):
         path.write_text(f"#!/system/bin/sh\nprintf '{label}\\n'\n")
         path.chmod(0o755)
 
-    def write_lxc_asset(self, path: Path, names=LXC_REQUIRED_BINARIES):
+    def write_lxc_asset(self, path: Path, names=LXC_REQUIRED_BINARIES, include_template=True):
         with tarfile.open(path, "w:gz") as archive:
             for name in names:
                 data = f"#!/system/bin/sh\nprintf '{name} test binary\\n'\n".encode()
@@ -836,11 +969,12 @@ class RuntimeInstallTest(unittest.TestCase):
                 info.size = len(data)
                 info.mode = 0o755
                 archive.addfile(info, io.BytesIO(data))
-            data = b"#!/system/bin/sh\nprintf 'download template\\n'\n"
-            info = tarfile.TarInfo("lxc/share/lxc/templates/lxc-download")
-            info.size = len(data)
-            info.mode = 0o644
-            archive.addfile(info, io.BytesIO(data))
+            if include_template:
+                data = b"#!/system/bin/sh\nDOWNLOAD_VALIDATE=\"true\"\nprintf 'download template\\n'\n"
+                info = tarfile.TarInfo("lxc/share/lxc/templates/lxc-download")
+                info.size = len(data)
+                info.mode = 0o644
+                archive.addfile(info, io.BytesIO(data))
 
     def write_buildkit_asset(self, path: Path, names=BUILDKIT_REQUIRED_BINARIES):
         with tarfile.open(path, "w:gz") as archive:
