@@ -6,9 +6,13 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const LINUX_GUEST_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 120;
+const MAX_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug)]
 struct RuntimeEnv {
@@ -308,22 +312,24 @@ fn action_json(label: &str, result: CommandResult) -> Value {
 }
 
 fn run_and_report(label: &str, program: &Path, args: &[String]) -> Value {
-    action_json(label, run_program(program, args))
+    action_json(
+        label,
+        run_program_timeout(program, args, action_timeout_secs(label)),
+    )
 }
 
 fn run_program(program: &Path, args: &[String]) -> CommandResult {
-    match Command::new(program).args(args).output() {
-        Ok(output) => {
-            let rc = output.status.code().unwrap_or(1);
-            let mut text = String::new();
-            text.push_str(&String::from_utf8_lossy(&output.stdout));
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
-            CommandResult {
-                ok: output.status.success(),
-                rc,
-                output: trim_trailing_newlines(text),
-            }
-        }
+    run_program_timeout(program, args, command_timeout_secs())
+}
+
+fn run_program_timeout(program: &Path, args: &[String], timeout_secs: u64) -> CommandResult {
+    match Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => wait_with_timeout(program, child, timeout_secs),
         Err(error) => CommandResult {
             ok: false,
             rc: 1,
@@ -341,8 +347,9 @@ fn run_program_with_input(program: &Path, args: &[String], input: &str) -> Comma
         .spawn()
     {
         Ok(mut child) => {
-            if let Some(stdin) = child.stdin.as_mut() {
+            if let Some(mut stdin) = child.stdin.take() {
                 if let Err(error) = stdin.write_all(input.as_bytes()) {
+                    let _ = child.kill();
                     return CommandResult {
                         ok: false,
                         rc: 1,
@@ -350,23 +357,68 @@ fn run_program_with_input(program: &Path, args: &[String], input: &str) -> Comma
                     };
                 }
             }
-            match child.wait_with_output() {
-                Ok(output) => {
-                    let rc = output.status.code().unwrap_or(1);
-                    let mut text = String::new();
-                    text.push_str(&String::from_utf8_lossy(&output.stdout));
-                    text.push_str(&String::from_utf8_lossy(&output.stderr));
-                    CommandResult {
-                        ok: output.status.success(),
-                        rc,
-                        output: trim_trailing_newlines(text),
-                    }
+            wait_with_timeout(program, child, command_timeout_secs())
+        }
+        Err(error) => CommandResult {
+            ok: false,
+            rc: 1,
+            output: error.to_string(),
+        },
+    }
+}
+
+fn wait_with_timeout(program: &Path, mut child: Child, timeout_secs: u64) -> CommandResult {
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return collect_child_output(child, false, timeout_secs),
+            Ok(None) => {
+                if start.elapsed() >= Duration::from_secs(timeout_secs) {
+                    let _ = child.kill();
+                    return collect_child_output(child, true, timeout_secs);
                 }
-                Err(error) => CommandResult {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                return CommandResult {
                     ok: false,
                     rc: 1,
-                    output: error.to_string(),
+                    output: format!("{}: {error}", program.display()),
+                };
+            }
+        }
+    }
+}
+
+fn collect_child_output(child: Child, timed_out: bool, timeout_secs: u64) -> CommandResult {
+    match child.wait_with_output() {
+        Ok(output) => {
+            let mut text = Vec::new();
+            text.extend_from_slice(&output.stdout);
+            text.extend_from_slice(&output.stderr);
+            let truncated = text.len() > MAX_COMMAND_OUTPUT_BYTES;
+            if truncated {
+                text.truncate(MAX_COMMAND_OUTPUT_BYTES);
+            }
+            let mut text = String::from_utf8_lossy(&text).into_owned();
+            if truncated {
+                text.push_str("\n[output truncated by achost-webui-api]");
+            }
+            if timed_out {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&format!("command timed out after {timeout_secs}s"));
+            }
+            CommandResult {
+                ok: !timed_out && output.status.success(),
+                rc: if timed_out {
+                    124
+                } else {
+                    output.status.code().unwrap_or(1)
                 },
+                output: trim_trailing_newlines(text),
             }
         }
         Err(error) => CommandResult {
@@ -375,6 +427,24 @@ fn run_program_with_input(program: &Path, args: &[String], input: &str) -> Comma
             output: error.to_string(),
         },
     }
+}
+
+fn action_timeout_secs(label: &str) -> u64 {
+    match label {
+        "pull-image" | "lxc-import-rootfs" => 600,
+        "start-docker" | "stop-docker" | "add-container" | "lxc-start" | "lxc-stop"
+        | "lxc-force-stop" => 180,
+        "lxc-exec" => 60,
+        _ => command_timeout_secs(),
+    }
+}
+
+fn command_timeout_secs() -> u64 {
+    env::var("ACHOST_WEBUI_COMMAND_TIMEOUT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| (5..=900).contains(value))
+        .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS)
 }
 
 fn run_program_capture(program: &Path, args: &[&str]) -> CommandResult {

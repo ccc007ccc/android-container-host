@@ -52,6 +52,8 @@ type NavItem = {
   label: string;
 };
 
+type SheetState = { kind: 'none' } | { kind: 'output'; title: string };
+
 const DEFAULT_API = '/data/adb/modules/achost-lxc/achost/bin/achost-webui-api.sh';
 const app = document.querySelector<HTMLDivElement>('#app');
 
@@ -64,6 +66,7 @@ const state = {
   output: '',
   ui: {
     expanded: {} as Record<string, boolean>,
+    sheet: { kind: 'none' } as SheetState,
   },
   forms: {
     importName: 'ubuntu-26.04',
@@ -237,11 +240,18 @@ async function runAction(label: string, action: string, args: string[] = [], ref
   await nextFrame();
   try {
     const response = await callApi(action, args);
+    const failed = response.ok === false;
     state.output = responseText(response);
-    notify(response.ok === false ? `${label}失败` : `${label}完成`);
+    notify(failed ? `${label}失败` : `${label}完成`);
     if (refreshAfter) await refresh();
+    if (failed || !refreshAfter) {
+      state.ui.sheet = { kind: 'output', title: failed ? `${label}失败` : label };
+    } else if (state.ui.sheet.kind !== 'none') {
+      state.ui.sheet = { kind: 'none' };
+    }
   } catch (error) {
     state.output = error instanceof Error ? error.message : String(error);
+    state.ui.sheet = { kind: 'output', title: `${label}失败` };
     notify(`${label}失败`);
   } finally {
     state.busy = '';
@@ -277,10 +287,12 @@ async function importRootfs(): Promise<void> {
       outputs.push(`## 启动容器\n${responseText(started)}`);
     }
     state.output = outputs.join('\n\n');
+    if (failed) state.ui.sheet = { kind: 'output', title: '导入 rootfs 失败' };
     notify(failed ? '导入 rootfs 失败' : '导入 rootfs 完成');
     await refresh();
   } catch (error) {
     state.output = outputs.concat(error instanceof Error ? error.message : String(error)).join('\n\n');
+    state.ui.sheet = { kind: 'output', title: '导入 rootfs 失败' };
     notify('导入 rootfs 失败');
   } finally {
     state.busy = '';
@@ -299,12 +311,15 @@ async function setPassword(): Promise<void> {
   render();
   try {
     const response = await callApiWithEnv('lxc-set-password', [name, user], { ACHOST_LXC_PASSWORD: password });
+    const failed = response.ok === false;
     state.output = responseText(response);
     state.forms.passwordValue = '';
-    notify(response.ok === false ? '设置密码失败' : '设置密码完成');
+    if (failed) state.ui.sheet = { kind: 'output', title: '设置密码失败' };
+    notify(failed ? '设置密码失败' : '设置密码完成');
   } catch (error) {
     state.output = error instanceof Error ? error.message : String(error);
     state.forms.passwordValue = '';
+    state.ui.sheet = { kind: 'output', title: '设置密码失败' };
     notify('设置密码失败');
   } finally {
     state.busy = '';
@@ -509,7 +524,7 @@ function renderOutputAccordion(id: string, fallback?: unknown): string {
     id,
     '最近输出',
     'Output',
-    `<pre class="output-pre">${escapeHtml(text)}</pre>`,
+    `<pre class="output-pre">${escapeHtml(text)}</pre><div class="button-row compact"><button type="button" class="ghost" data-action="output">打开输出面板</button></div>`,
     false,
   );
 }
@@ -522,7 +537,8 @@ function renderMain(): string {
 }
 
 function renderTopActions(): string {
-  return `${statusPill()}${button(state.busy === 'refresh' ? '刷新中…' : '刷新', 'refresh', 'ghost', Boolean(state.busy))}${button('检查', 'check', '', Boolean(state.busy))}`;
+  const outputButton = state.output ? button('输出', 'output', 'ghost', false) : '';
+  return `${statusPill()}${button(state.busy === 'refresh' ? '刷新中…' : '刷新', 'refresh', 'ghost', Boolean(state.busy))}${button('检查', 'check', '', Boolean(state.busy))}${outputButton}`;
 }
 
 function renderBrand(): string {
@@ -539,7 +555,27 @@ function render(): void {
       <div class="page-stack">${renderMain()}</div>
     </section>
     ${nav('bottom-nav')}
+    ${renderSheet()}
   </main>`;
+}
+
+function renderSheet(): string {
+  if (state.ui.sheet.kind === 'none') return '';
+  return `
+    <div class="sheet-layer" data-backdrop="sheet">
+      <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+        <div class="sheet-handle"></div>
+        <header class="sheet-head">
+          <div>
+            <p class="eyebrow">Action sheet</p>
+            <h2 id="sheet-title">${escapeHtml(state.ui.sheet.title)}</h2>
+          </div>
+          <button type="button" class="icon-button ghost" data-action="close-sheet" aria-label="关闭">关闭</button>
+        </header>
+        <div class="sheet-body"><pre class="output-pre sheet-output">${escapeHtml(state.output || '暂无输出')}</pre></div>
+        <footer class="sheet-footer">${button('关闭', 'close-sheet', 'ghost', false)}</footer>
+      </section>
+    </div>`;
 }
 
 function handleInput(event: Event): void {
@@ -561,6 +597,16 @@ function handleInput(event: Event): void {
 }
 
 async function handleAction(action: string): Promise<void> {
+  if (action === 'close-sheet') {
+    state.ui.sheet = { kind: 'none' };
+    render();
+    return;
+  }
+  if (action === 'output') {
+    state.ui.sheet = { kind: 'output', title: '输出' };
+    render();
+    return;
+  }
   if (action === 'refresh') return refresh();
   if (action === 'check') return runAction('运行 LXC 检查', 'lxc-check', [], false);
   if (action === 'open-import') {

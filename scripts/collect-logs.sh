@@ -46,6 +46,46 @@ shell_file() {
     } > "$WORK_DIR/$name.txt"
 }
 
+diagnostic_summary() {
+    printf '## system/root\n'
+    id 2>/dev/null || true
+    getenforce 2>/dev/null || true
+    printf 'runtime_mode=%s\n' "$ACHOST_RUNTIME_MODE"
+    printf 'docker_host=%s\n' "$DOCKER_HOST"
+    printf 'containerd_address=%s\n' "$CONTAINERD_ADDRESS"
+
+    printf '\n## module_installation\n'
+    for path in /data/adb/modules/achost-base /data/adb/modules/achost-docker /data/adb/modules/achost-lxc "$ACHOST"; do
+        if [ -e "$path" ]; then
+            ls -ld "$path" 2>/dev/null || true
+        else
+            printf 'missing: %s\n' "$path"
+        fi
+    done
+
+    printf '\n## daemon_state\n'
+    for item in supervisor:"$ACHOST_SUPERVISOR_PID" containerd:"$ACHOST_CONTAINERD_PID" dockerd:"$ACHOST_DOCKERD_PID" network_watchdog:"$ACHOST_NET_PID"; do
+        name="${item%%:*}"
+        pid_file="${item#*:}"
+        if [ -r "$pid_file" ]; then
+            pid="$(cat "$pid_file" 2>/dev/null || true)"
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                printf '%s=running pid=%s pid_file=%s\n' "$name" "$pid" "$pid_file"
+            else
+                printf '%s=stale pid=%s pid_file=%s\n' "$name" "$pid" "$pid_file"
+            fi
+        else
+            printf '%s=missing pid_file=%s\n' "$name" "$pid_file"
+        fi
+    done
+
+    printf '\n## recovery_hints\n'
+    printf 'Docker start: su -c ". /data/adb/modules/achost-base/achost/bin/achost-container-env.sh; /data/adb/modules/achost-docker/achost/bin/achost-docker-runtime start"\n'
+    printf 'Docker stop:  su -c ". /data/adb/modules/achost-base/achost/bin/achost-container-env.sh; /data/adb/modules/achost-docker/achost/bin/achost-docker-runtime stop"\n'
+    printf 'LXC status:   su -c "/data/adb/modules/achost-lxc/achost/bin/achost-lxc-runtime list"\n'
+    printf 'Logs:         %s and %s\n' "$WORK_DIR" "$ARCHIVE"
+}
+
 native_namespace_report() {
     printf 'runtime_mode=%s\n' "$ACHOST_RUNTIME_MODE"
     printf 'native_root=%s\n' "$ACHOST_NATIVE_ROOT"
@@ -76,6 +116,7 @@ native_namespace_report() {
     fi
 }
 
+section_file achost_summary diagnostic_summary
 section_file uname uname -a
 section_file proc_version cat /proc/version
 shell_file proc_config 'zcat /proc/config.gz 2>/dev/null || cat /proc/config.gz 2>/dev/null'
@@ -96,13 +137,15 @@ shell_file iptables_nat 'iptables -t nat -S 2>/dev/null'
 shell_file iptables_mangle 'iptables -t mangle -S 2>/dev/null'
 shell_file ip_forward 'cat /proc/sys/net/ipv4/ip_forward 2>/dev/null'
 shell_file ipv6_forwarding 'cat /proc/sys/net/ipv6/conf/all/forwarding 2>/dev/null'
-shell_file achost_network_watchdog "if [ -r '$ACHOST_NET_PID' ]; then pid=\$(cat '$ACHOST_NET_PID' 2>/dev/null); printf 'pid=%s\\n' \"\$pid\"; if kill -0 \"\$pid\" 2>/dev/null; then printf 'running=1\\n'; else printf 'running=0\\n'; fi; else printf 'pid file not found: %s\\n' '$ACHOST_NET_PID'; fi; { ps -A 2>/dev/null || ps 2>/dev/null; } | grep '[c]ontainer-network-watchdog' || true; printf '\\n## watchdog_log\\n'; if [ -r '$ACHOST_NET_LOG' ]; then tail -n 200 '$ACHOST_NET_LOG'; else printf 'watchdog log not found: %s\\n' '$ACHOST_NET_LOG'; fi"
+shell_file achost_network_watchdog "if [ -r '$ACHOST_NET_PID' ]; then pid=\$(cat '$ACHOST_NET_PID' 2>/dev/null); printf 'pid=%s\\n' \"\$pid\"; if kill -0 \"\$pid\" 2>/dev/null; then printf 'running=1\\n'; tr '\\0' ' ' < \"/proc/\$pid/cmdline\" 2>/dev/null; printf '\\n'; else printf 'running=0\\n'; fi; else printf 'pid file not found: %s\\n' '$ACHOST_NET_PID'; fi; { ps -A -o PID,ARGS 2>/dev/null || ps -A 2>/dev/null || ps 2>/dev/null; } | grep -E '[a]chost-runtime-core.*net-watchdog|[n]et-watchdog' || true; printf '\\n## watchdog_log\\n'; if [ -r '$ACHOST_NET_LOG' ]; then tail -n 200 '$ACHOST_NET_LOG'; else printf 'watchdog log not found: %s\\n' '$ACHOST_NET_LOG'; fi"
 shell_file achost_container_validate "if [ -x '$ACHOST/bin/achost-container-validate.sh' ]; then '$ACHOST/bin/achost-container-validate.sh'; else printf 'validation script not found: %s\\n' '$ACHOST/bin/achost-container-validate.sh'; fi"
 shell_file achost_daemon_logs "for file in '$ACHOST/var/log/dockerd.log' '$ACHOST/var/log/containerd.log' '$ACHOST/var/log/achost-supervise.log'; do printf '## %s\\n' \"\$file\"; if [ -r \"\$file\" ]; then tail -n 200 \"\$file\"; else printf 'not found\\n'; fi; done"
 section_file achost_native_namespace native_namespace_report
 shell_file docker_info 'docker info 2>/dev/null'
 shell_file docker_version 'docker version 2>/dev/null'
 shell_file docker_ps 'docker ps -a 2>/dev/null'
+shell_file docker_stats 'docker stats --no-stream 2>/dev/null'
+shell_file docker_container_cgroups 'for cid in $(docker ps -q --no-trunc 2>/dev/null); do printf "## container %s\n" "$cid"; docker inspect --format "name={{.Name}} pid={{.State.Pid}}" "$cid" 2>/dev/null || true; pid=$(docker inspect --format "{{.State.Pid}}" "$cid" 2>/dev/null || true); if [ -n "$pid" ] && [ "$pid" != "0" ] && [ -r "/proc/$pid/cgroup" ]; then cat "/proc/$pid/cgroup"; fi; done'
 shell_file docker_bridge 'docker network inspect bridge 2>/dev/null'
 shell_file lxc_checkconfig 'lxc-checkconfig 2>/dev/null'
 shell_file lxc_ls 'lxc-ls -f 2>/dev/null'

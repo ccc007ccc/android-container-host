@@ -101,6 +101,8 @@ fi
 
 if command -v docker >/dev/null 2>&1; then
     run_cmd docker info
+    run_cmd docker stats --no-stream
+    run_shell "docker container cgroups" "for cid in \$(docker ps -q --no-trunc 2>/dev/null); do printf '## %s\n' \"\$cid\"; pid=\$(docker inspect --format '{{.State.Pid}}' \"\$cid\" 2>/dev/null || true); printf 'pid=%s\n' \"\$pid\"; [ -n \"\$pid\" ] && [ \"\$pid\" != 0 ] && cat \"/proc/\$pid/cgroup\" 2>/dev/null || true; done"
     run_cmd docker network inspect bridge
 else
     section "docker"

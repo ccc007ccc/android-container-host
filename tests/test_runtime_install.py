@@ -267,12 +267,16 @@ class RuntimeInstallTest(unittest.TestCase):
             report = generate_runtime_package(output, mode="kernelsu-module", module_target="base")
             manifest = json.loads((output / "manifest.json").read_text())
             paths = {item["path"] for item in manifest["files"]}
+            env_text = (output / "achost" / "bin" / "achost-container-env.sh").read_text()
+            service_text = (output / "service.sh").read_text()
+            customize_text = (output / "customize.sh").read_text()
 
             self.assertEqual(report["module_id"], "achost-base")
             self.assertEqual(manifest["module_target"], "base")
             self.assertEqual(manifest["requires"], [])
             self.assertEqual(manifest["provides"], ["common"])
             self.assertIn("achost/bin/achost-container-env.sh", paths)
+            self.assertIn('LXC_TEMPLATE_PATH="${LXC_TEMPLATE_PATH:-$ACHOST_LXC/share/lxc/templates}"', env_text)
             self.assertIn("achost/bin/achost-runtime-core", paths)
             self.assertIn("achost/bin/achost-supervise", paths)
             for wrapper_path in [
@@ -298,6 +302,11 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertFalse((output / "system" / "vendor" / "bin" / "docker").exists())
             self.assertFalse((output / "system" / "vendor" / "xbin" / "docker").exists())
             self.assertFalse((output / "webroot" / "index.html").exists())
+            self.assertIn('"$ACHOST_NATIVE_ROOT"', service_text)
+            self.assertNotIn('"$ACHOST_VAR/docker"', service_text)
+            self.assertNotIn('"$ACHOST_VAR/lxc"', service_text)
+            self.assertNotIn('"$ACHOST_DATA/docker"', customize_text)
+            self.assertNotIn('"$ACHOST_DATA/lxc"', customize_text)
             self.assertNotIn("docker", manifest["included_categories"])
             self.assertNotIn("lxc", manifest["included_categories"])
             self.assertNotIn("webui", manifest["included_categories"])
@@ -311,6 +320,7 @@ class RuntimeInstallTest(unittest.TestCase):
             webroot_index_text = (output / "webroot" / "index.html").read_text()
             webroot_text = self.webroot_text(output)
             paths = {item["path"] for item in manifest["files"]}
+            module_prop = (output / "module.prop").read_text()
             service_text = (output / "service.sh").read_text()
             customize_text = (output / "customize.sh").read_text()
             uninstall_text = (output / "uninstall.sh").read_text()
@@ -320,6 +330,7 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertEqual(manifest["module_target"], "docker")
             self.assertEqual(manifest["requires"], ["achost-base"])
             self.assertEqual(manifest["provides"], ["docker"])
+            self.assertIn("requires=achost-base", module_prop)
             self.assertNotIn("achost/bin/achost-docker-start.sh", paths)
             self.assertNotIn("achost/bin/achost-docker-stop.sh", paths)
             self.assertIn("achost/bin/achost-docker-runtime", paths)
@@ -341,12 +352,21 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIsNone(report["assets"]["lxc_runtime"])
             self.assertIn("/data/adb/ksu/bin", service_text)
             self.assertIn("/data/adb/ksu/bin", customize_text)
+            self.assertIn("requires achost-base module", service_text)
+            self.assertIn("requires achost-base module", customize_text)
+            self.assertIn("keeping existing non-ACHost command", service_text)
+            self.assertIn("keeping existing non-ACHost command", customize_text)
             self.assertIn("ACHOST_DOCKER_WRAPPER", service_text)
             self.assertIn("ACHOST_DOCKER_WRAPPER", customize_text)
             self.assertIn("rewrite_docker_mount", service_text)
             self.assertIn("rewrite_docker_mount", customize_text)
             self.assertIn("achost-docker-runtime", service_text)
             self.assertIn('"$ACHOST/bin/achost-docker-runtime" start', service_text)
+            self.assertIn('"$ACHOST_VAR/docker"', service_text)
+            self.assertIn('"$ACHOST_VAR/containerd/root"', service_text)
+            self.assertNotIn('"$ACHOST_VAR/lxc"', service_text)
+            self.assertIn('"$ACHOST_DATA/docker"', customize_text)
+            self.assertNotIn('"$ACHOST_DATA/lxc"', customize_text)
             self.assertNotIn("lxc-autostart.log", service_text)
             self.assertIn('"$ACHOST/bin/achost-docker-runtime" stop', uninstall_text)
             self.assertIn("grep -q 'ACHOST_DOCKER_WRAPPER'", uninstall_text)
@@ -427,6 +447,7 @@ class RuntimeInstallTest(unittest.TestCase):
             report = generate_runtime_package(output, mode="kernelsu-module", module_target="lxc")
             manifest = json.loads((output / "manifest.json").read_text())
             paths = {item["path"] for item in manifest["files"]}
+            module_prop = (output / "module.prop").read_text()
             service_text = (output / "service.sh").read_text()
             customize_text = (output / "customize.sh").read_text()
             webui_config = json.loads((output / "webroot" / "achost-webui-config.json").read_text())
@@ -438,6 +459,7 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertEqual(manifest["module_target"], "lxc")
             self.assertEqual(manifest["requires"], ["achost-base"])
             self.assertEqual(manifest["provides"], ["lxc"])
+            self.assertIn("requires=achost-base", module_prop)
             self.assertIn("achost/bin/achost-lxc-runtime", paths)
             self.assertIn("achost/bin/achost-lxc-validate.sh", paths)
             self.assertIn("achost/etc/lxc/default.conf", paths)
@@ -450,13 +472,26 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertIn("webroot/index.html", paths)
             self.assertIn('chmod 0755 "$ACHOST/lxc/bin"/*', service_text)
             self.assertIn('chmod 0755 "$ACHOST/lxc/bin"/*', customize_text)
+            self.assertIn('chmod 0755 "$ACHOST/lxc/share/lxc/templates"/lxc-*', service_text)
+            self.assertIn('chmod 0755 "$ACHOST/lxc/share/lxc/templates"/lxc-*', customize_text)
             self.assertIn("/data/adb/ksu/bin", service_text)
             self.assertIn("/data/adb/ksu/bin", customize_text)
+            self.assertIn("requires achost-base module", service_text)
+            self.assertIn("requires achost-base module", customize_text)
+            self.assertIn("keeping existing non-ACHost command", service_text)
+            self.assertIn("keeping existing non-ACHost command", customize_text)
             self.assertIn("ACHOST_LXC_WRAPPER", service_text)
             self.assertIn("ACHOST_LXC_WRAPPER", customize_text)
             self.assertIn('exec "$ACHOST/lxc/bin/$name" "$@"', service_text)
             self.assertIn('"$ACHOST/bin/achost-lxc-runtime" autostart', service_text)
             self.assertIn("lxc-autostart.log", service_text)
+            self.assertIn('"$ACHOST_VAR/lxc"', service_text)
+            self.assertIn('"$ACHOST_VAR/run/lxc"', service_text)
+            self.assertNotIn('"$ACHOST_VAR/docker"', service_text)
+            self.assertNotIn('"$ACHOST_VAR/containerd/root"', service_text)
+            self.assertIn('"$ACHOST_DATA/lxc"', customize_text)
+            self.assertNotIn('"$ACHOST_DATA/docker"', customize_text)
+            self.assertNotIn('"$ACHOST_DATA/containerd/root"', customize_text)
             self.assertNotIn('"$ACHOST/bin/achost-docker-runtime" start', service_text)
             self.assertIn("grep -q 'ACHOST_LXC_WRAPPER'", uninstall_text)
             self.assertIn("/data/adb/ksu/bin/lxc*", uninstall_text)
@@ -514,6 +549,10 @@ class RuntimeInstallTest(unittest.TestCase):
                 generate_runtime_package(output, mode="kernelsu-module", module_target="docker", lxc_asset="lxc.tgz")
             with self.assertRaisesRegex(ValueError, "lxc module target does not accept"):
                 generate_runtime_package(output, mode="kernelsu-module", module_target="lxc", buildx_asset="buildx")
+            with self.assertRaisesRegex(ValueError, "start_docker_on_boot requires a Docker module target"):
+                generate_runtime_package(Path(tmp) / "base-autostart", mode="kernelsu-module", module_target="base", start_docker_on_boot=True)
+            with self.assertRaisesRegex(ValueError, "start_docker_on_boot requires a Docker module target"):
+                generate_runtime_package(Path(tmp) / "lxc-autostart", mode="kernelsu-module", module_target="lxc", start_docker_on_boot=True)
 
     def test_kernelsu_module_can_start_docker_on_boot(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -576,6 +615,19 @@ class RuntimeInstallTest(unittest.TestCase):
                 generate_runtime_package(Path(tmp) / "manual", docker_runtime_mode="bad")
             with self.assertRaisesRegex(ValueError, "unsupported docker runtime mode"):
                 generate_runtime_package(Path(tmp) / "manual-chroot", docker_runtime_mode="chroot")
+
+    def test_docker_runtime_stop_uses_achost_scoped_process_cleanup(self):
+        source = (Path(__file__).resolve().parents[1] / "crates" / "achost-docker-runtime" / "src" / "main.rs").read_text()
+
+        self.assertIn('let dockerd = config.achost_bin.join("dockerd");', source)
+        self.assertIn('let containerd = config.achost_bin.join("containerd");', source)
+        self.assertIn('stop_pid_file("dockerd", &config.dockerd_pid, &dockerd)', source)
+        self.assertIn('stop_owned_processes("dockerd", &dockerd)', source)
+        self.assertIn('stop_owned_processes("containerd", &containerd)', source)
+        self.assertIn("process_uses_executable", source)
+        self.assertIn("stop_network_watchdog", source)
+        self.assertNotIn("stop_named_processes", source)
+        self.assertNotIn("pids_for_name", source)
 
     def test_docker_asset_extracts_binaries_and_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -706,8 +758,15 @@ class RuntimeInstallTest(unittest.TestCase):
                 binary = output / "achost" / "lxc" / "bin" / name
                 self.assertTrue(binary.exists(), name)
                 self.assertTrue(binary.stat().st_mode & stat.S_IXUSR, name)
+            template = output / "achost" / "lxc" / "share" / "lxc" / "templates" / "lxc-download"
+            self.assertTrue(template.exists())
+            self.assertTrue(template.stat().st_mode & stat.S_IXUSR)
             asset_entries = [item for item in manifest["files"] if item.get("asset") == "lxc"]
-            self.assertEqual({Path(item["path"]).name for item in asset_entries}, set(LXC_REQUIRED_BINARIES))
+            binary_entries = [item for item in asset_entries if Path(item["path"]).parent.as_posix() == "achost/lxc/bin"]
+            template_entries = [item for item in asset_entries if item["path"] == "achost/lxc/share/lxc/templates/lxc-download"]
+            self.assertEqual({Path(item["path"]).name for item in binary_entries}, set(LXC_REQUIRED_BINARIES))
+            self.assertEqual(len(template_entries), 1)
+            self.assertTrue(template_entries[0]["executable"])
 
     def test_refuses_lxc_asset_missing_required_binary(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -777,6 +836,11 @@ class RuntimeInstallTest(unittest.TestCase):
                 info.size = len(data)
                 info.mode = 0o755
                 archive.addfile(info, io.BytesIO(data))
+            data = b"#!/system/bin/sh\nprintf 'download template\\n'\n"
+            info = tarfile.TarInfo("lxc/share/lxc/templates/lxc-download")
+            info.size = len(data)
+            info.mode = 0o644
+            archive.addfile(info, io.BytesIO(data))
 
     def write_buildkit_asset(self, path: Path, names=BUILDKIT_REQUIRED_BINARIES):
         with tarfile.open(path, "w:gz") as archive:

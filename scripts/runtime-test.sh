@@ -73,11 +73,40 @@ check_network_watchdog() {
     else
         printf 'pid file not found: %s\n' "$pid_file"
     fi
-    { ps -A -o PID,ARGS 2>/dev/null || ps -A 2>/dev/null || ps 2>/dev/null; } | grep -E '[a]chost-runtime-core|[n]et-watchdog' || true
+    { ps -A -o PID,ARGS 2>/dev/null || ps -A 2>/dev/null || ps 2>/dev/null; } | grep -E '[a]chost-runtime-core.*net-watchdog|[n]et-watchdog' || true
     if [ -r "$log_file" ]; then
         tail -n 40 "$log_file" 2>/dev/null || true
     else
         printf 'watchdog log not found: %s\n' "$log_file"
+    fi
+}
+
+docker_daemon_ready() {
+    [ -x "$DOCKER_BIN/docker" ] || return 1
+    "$DOCKER_BIN/docker" --host "${DOCKER_HOST:-unix://${ACHOST_RUN:-/data/adb/achost/run}/docker.sock}" info >/dev/null 2>&1
+}
+
+docker_runtime_status() {
+    printf 'docker_root=%s\n' "$DOCKER_ROOT"
+    printf 'docker_bin=%s\n' "$DOCKER_BIN"
+    printf 'docker_host=%s\n' "${DOCKER_HOST:-unix://${ACHOST_RUN:-/data/adb/achost/run}/docker.sock}"
+    for file in "${ACHOST_DOCKERD_PID:-${ACHOST_RUN:-/data/adb/achost/run}/dockerd.pid}" "${ACHOST_CONTAINERD_PID:-${ACHOST_RUN:-/data/adb/achost/run}/containerd.pid}" "${ACHOST_SUPERVISOR_PID:-${ACHOST_RUN:-/data/adb/achost/run}/achost-supervise.pid}"; do
+        if [ -r "$file" ]; then
+            pid="$(cat "$file" 2>/dev/null || true)"
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                printf 'pid_file=%s pid=%s running=1\n' "$file" "$pid"
+            else
+                printf 'pid_file=%s pid=%s running=0\n' "$file" "$pid"
+            fi
+        else
+            printf 'pid_file=%s missing=1\n' "$file"
+        fi
+    done
+    if docker_daemon_ready; then
+        printf 'docker_api=ready\n'
+        "$DOCKER_BIN/docker" --host "${DOCKER_HOST:-unix://${ACHOST_RUN:-/data/adb/achost/run}/docker.sock}" info --format 'CgroupVersion={{.CgroupVersion}} CgroupDriver={{.CgroupDriver}} Driver={{.Driver}}' 2>/dev/null || true
+    else
+        printf 'docker_api=not-ready\n'
     fi
 }
 
@@ -111,13 +140,26 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "docker" ]; then
     ACHOST_CONTAINERD_CONFIG="$ACHOST_ETC/containerd/config.toml"
     PATH="$DOCKER_BIN:$COMMON_BIN:$PATH"
     export ACHOST ACHOST_BIN ACHOST_ETC ACHOST_COMMON ACHOST_COMMON_BIN DOCKER_CONFIG DOCKER_CLI_PLUGIN_EXTRA_DIRS ACHOST_CONTAINERD_CONFIG PATH
+    section "Docker status before tests"
+    docker_runtime_status
+    DOCKER_WAS_RUNNING=0
+    if docker_daemon_ready; then
+        DOCKER_WAS_RUNNING=1
+    fi
     run_script "protect container daemons" "$COMMON_BIN/achost-runtime-core" 0 protect-daemons
     run_script "Docker daemon start" "$DOCKER_BIN/achost-docker-runtime" 1 start
     run_script "container network reconcile" "$COMMON_BIN/achost-runtime-core" 0 net-reconcile
     run_script "Docker runtime smoke" "$DOCKER_BIN/runtime-smoke-docker.sh" 1
     run_script "Docker feature matrix" "$DOCKER_BIN/runtime-docker-feature-test.sh" 1
     run_script "network debug after Docker" "$COMMON_BIN/runtime-net-debug.sh" 0
-    run_script "Docker daemon stop" "$DOCKER_BIN/achost-docker-runtime" 0 stop
+    if [ "$DOCKER_WAS_RUNNING" = "1" ]; then
+        section "Docker daemon restore"
+        printf 'Docker was running before runtime-test; leaving it running.\n'
+    else
+        run_script "Docker daemon stop" "$DOCKER_BIN/achost-docker-runtime" 0 stop
+    fi
+    section "Docker status after tests"
+    docker_runtime_status
 fi
 
 if [ "$MODE" = "all" ] || [ "$MODE" = "lxc" ]; then

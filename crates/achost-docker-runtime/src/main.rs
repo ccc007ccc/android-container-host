@@ -67,6 +67,8 @@ struct DockerRuntimeConfig {
     containerd_log: PathBuf,
     external_containerd: bool,
     container_bridge: String,
+    network_watchdog_pid: PathBuf,
+    network_watchdog_log: PathBuf,
 }
 
 impl DockerRuntimeConfig {
@@ -156,6 +158,10 @@ impl DockerRuntimeConfig {
             external_containerd: env::var("ACHOST_EXTERNAL_CONTAINERD")
                 .map_or(true, |value| value == "1"),
             container_bridge,
+            network_watchdog_pid: env_path("ACHOST_NET_PID")
+                .unwrap_or_else(|| PathBuf::from("/data/local/tmp/achost-network-watchdog.pid")),
+            network_watchdog_log: env_path("ACHOST_NET_LOG")
+                .unwrap_or_else(|| PathBuf::from("/data/local/tmp/achost-network-watchdog.log")),
         }
     }
 }
@@ -164,6 +170,9 @@ impl DockerRuntimeConfig {
 struct DockerStopConfig {
     use_chroot: bool,
     chroot: PathBuf,
+    achost_bin: PathBuf,
+    common_bin: PathBuf,
+    supervise: PathBuf,
     dockerd_pid: PathBuf,
     dockerd_launch_pid: PathBuf,
     containerd_pid: PathBuf,
@@ -172,16 +181,24 @@ struct DockerStopConfig {
     docker_socket: Option<PathBuf>,
     compat_socket: Option<PathBuf>,
     containerd_address: PathBuf,
+    network_watchdog_pid: PathBuf,
+    network_watchdog_log: PathBuf,
 }
 
 impl DockerStopConfig {
     fn from_env() -> Self {
         let achost = env_path("ACHOST").unwrap_or_else(|| PathBuf::from("/data/adb/achost"));
         let achost_var = env_path("ACHOST_VAR").unwrap_or_else(|| achost.join("var"));
+        let achost_bin = env_path("ACHOST_BIN").unwrap_or_else(|| achost.join("bin"));
+        let common_bin = env_path("ACHOST_COMMON_BIN").unwrap_or_else(|| achost_bin.clone());
         let run = env_path("ACHOST_RUN").unwrap_or_else(|| achost_var.join("run"));
         Self {
             use_chroot: env::var("ACHOST_USE_CHROOT").is_ok_and(|value| value == "1"),
             chroot: env_path("ACHOST_CHROOT").unwrap_or_else(|| achost_var.join("chroot")),
+            achost_bin,
+            common_bin: common_bin.clone(),
+            supervise: env_path("ACHOST_SUPERVISE")
+                .unwrap_or_else(|| common_bin.join("achost-supervise")),
             dockerd_pid: env_path("ACHOST_DOCKERD_PID").unwrap_or_else(|| run.join("dockerd.pid")),
             dockerd_launch_pid: env_path("ACHOST_DOCKERD_LAUNCH_PID")
                 .unwrap_or_else(|| run.join("dockerd-launch.pid")),
@@ -201,6 +218,10 @@ impl DockerStopConfig {
                 .and_then(|value| unix_socket_path(&value)),
             containerd_address: env_path("CONTAINERD_ADDRESS")
                 .unwrap_or_else(|| run.join("containerd.sock")),
+            network_watchdog_pid: env_path("ACHOST_NET_PID")
+                .unwrap_or_else(|| PathBuf::from("/data/local/tmp/achost-network-watchdog.pid")),
+            network_watchdog_log: env_path("ACHOST_NET_LOG")
+                .unwrap_or_else(|| PathBuf::from("/data/local/tmp/achost-network-watchdog.log")),
         }
     }
 }
@@ -336,8 +357,14 @@ fn start_runtime(
     println!("cgroup_mode={}", config.cgroup_mode);
     println!("chroot_launch_mode={}", config.chroot_launch_mode);
 
-    if config.use_supervisor && !is_executable(&config.supervise) {
-        eprintln!("warning: achost-supervise missing; daemon descendants may be reparented to Android init");
+    if !config.use_supervisor {
+        return Err("Docker native startup requires achost-supervise; ACHOST_USE_SUPERVISOR=0 is unsupported".to_string());
+    }
+    if !is_executable(&config.supervise) {
+        return Err(format!(
+            "missing executable: {}",
+            config.supervise.display()
+        ));
     }
     if config.use_chroot {
         return Err("Docker chroot startup is not supported by achost-docker-runtime start; use native runtime".to_string());
@@ -346,7 +373,10 @@ fn start_runtime(
     prepare_native_root(config).map_err(|error| format!("prepare native root failed: {error}"))?;
     prepare_cgroups();
     if !ensure_supervisor_server(config) {
-        eprintln!("warning: native supervisor server not ready; private /run unavailable");
+        return Err(format!(
+            "native supervisor server not ready: {}",
+            config.supervisor_socket.display()
+        ));
     }
     native_preflight(config);
     run_protect_daemons(config);
@@ -362,17 +392,29 @@ fn start_runtime(
         } else {
             remove_file_quiet(&config.containerd_pid);
             remove_file_quiet(&config.containerd_address);
-            start_containerd_daemon(config);
-            if wait_for_socket(&config.containerd_address) {
-                if let Some(pid) = read_trimmed(&config.containerd_pid) {
-                    println!("containerd started pid={pid}");
-                }
-            } else {
-                eprintln!(
-                    "containerd socket not ready: {}",
-                    config.containerd_address.display()
-                );
+            if !start_containerd_daemon(config) {
+                return Err("containerd launch failed through achost-supervise".to_string());
             }
+        }
+        if wait_for_socket(&config.containerd_address) {
+            if let Some(pid) = read_trimmed(&config.containerd_pid) {
+                println!("containerd started pid={pid}");
+            }
+        } else {
+            return Err(format!(
+                "containerd socket not ready: {} log={}",
+                config.containerd_address.display(),
+                config.containerd_log.display()
+            ));
+        }
+        if wait_for_containerd_api(config) {
+            println!("containerd_api=ready");
+        } else {
+            return Err(format!(
+                "containerd API not ready: {} log={}",
+                config.containerd_address.display(),
+                config.containerd_log.display()
+            ));
         }
     } else {
         remove_file_quiet(&config.containerd_pid);
@@ -395,20 +437,35 @@ fn start_runtime(
             remove_file_quiet(path);
         }
         cleanup_stale_iptables();
-        start_dockerd(config, compat_host.as_deref(), extra_dockerd_args);
-        if let Some(socket) = config.docker_socket.as_deref() {
-            if wait_for_socket(socket) {
-                if let Some(pid) = dockerd_pid_for_display(config) {
-                    println!("dockerd started pid={pid}");
-                }
-                if supervisor_server_running(config) {
-                    if let Some(pid) = read_trimmed(&config.supervisor_pid) {
-                        println!("supervisor_pid={pid}");
-                    }
-                }
-            } else {
-                eprintln!("dockerd socket not ready: {}", socket.display());
+        if !start_dockerd(config, compat_host.as_deref(), extra_dockerd_args) {
+            return Err("dockerd launch failed through achost-supervise".to_string());
+        }
+    }
+    if let Some(socket) = config.docker_socket.as_deref() {
+        if wait_for_socket(socket) {
+            if let Some(pid) = dockerd_pid_for_display(config) {
+                println!("dockerd started pid={pid}");
             }
+            if supervisor_server_running(config) {
+                if let Some(pid) = read_trimmed(&config.supervisor_pid) {
+                    println!("supervisor_pid={pid}");
+                }
+            }
+        } else {
+            return Err(format!(
+                "dockerd socket not ready: {} log={}",
+                socket.display(),
+                config.dockerd_log.display()
+            ));
+        }
+        if wait_for_docker_api(config) {
+            println!("dockerd_api=ready");
+        } else {
+            return Err(format!(
+                "dockerd API not ready: {} log={}",
+                socket.display(),
+                config.dockerd_log.display()
+            ));
         }
     }
 
@@ -417,8 +474,9 @@ fn start_runtime(
         println!("network reconciled bridge={}", config.container_bridge);
     } else {
         eprintln!(
-            "warning: network reconciliation pending for bridge={}",
-            config.container_bridge
+            "warning: network reconciliation pending bridge={} log={}",
+            config.container_bridge,
+            config.network_watchdog_log.display()
         );
     }
     println!("DOCKER_HOST={}", config.docker_host);
@@ -542,7 +600,7 @@ fn ensure_supervisor_server(config: &DockerRuntimeConfig) -> bool {
         return false;
     }
     if supervisor_server_running(config) {
-        return true;
+        return supervisor_client_usable(config);
     }
     remove_file_quiet(&config.supervisor_pid);
     remove_file_quiet(&config.supervisor_socket);
@@ -569,12 +627,36 @@ fn ensure_supervisor_server(config: &DockerRuntimeConfig) -> bool {
         return false;
     }
     for _ in 0..10 {
-        if supervisor_server_running(config) {
+        if supervisor_server_running(config) && supervisor_client_usable(config) {
             return true;
         }
         thread::sleep(Duration::from_secs(1));
     }
     false
+}
+
+fn supervisor_client_usable(config: &DockerRuntimeConfig) -> bool {
+    let probe_pid = config.run.join("achost-supervise.probe.pid");
+    remove_file_quiet(&probe_pid);
+    let status = Command::new(&config.supervise)
+        .arg("--client")
+        .arg("--socket")
+        .arg(&config.supervisor_socket)
+        .arg("--name")
+        .arg("supervisor-probe")
+        .arg("--pid-file")
+        .arg(&probe_pid)
+        .arg("--")
+        .arg("/system/bin/sh")
+        .arg("-c")
+        .arg("exit 0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    remove_file_quiet(&probe_pid);
+    status
 }
 
 fn log_stdio(path: &Path) -> std::io::Result<(Stdio, Stdio)> {
@@ -690,6 +772,46 @@ fn wait_for_socket(path: &Path) -> bool {
     false
 }
 
+fn wait_for_containerd_api(config: &DockerRuntimeConfig) -> bool {
+    let ctr = config.achost_bin.join("ctr");
+    for _ in 0..15 {
+        if Command::new(&ctr)
+            .arg("--address")
+            .arg(&config.containerd_address)
+            .arg("version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return true;
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    false
+}
+
+fn wait_for_docker_api(config: &DockerRuntimeConfig) -> bool {
+    let docker = config.achost_bin.join("docker");
+    for _ in 0..30 {
+        if Command::new(&docker)
+            .arg("--host")
+            .arg(&config.docker_host)
+            .arg("info")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return true;
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    false
+}
+
 fn is_socket(path: &Path) -> bool {
     fs::metadata(path)
         .map(|metadata| metadata.file_type().is_socket())
@@ -740,16 +862,8 @@ fn spawn_network_watchdog(config: &DockerRuntimeConfig) {
     }
     Command::new(helper)
         .arg("net-watchdog")
-        .env(
-            "ACHOST_NET_LOG",
-            env::var("ACHOST_NET_LOG")
-                .unwrap_or_else(|_| "/data/local/tmp/achost-network-watchdog.log".to_string()),
-        )
-        .env(
-            "ACHOST_NET_PID",
-            env::var("ACHOST_NET_PID")
-                .unwrap_or_else(|_| "/data/local/tmp/achost-network-watchdog.pid".to_string()),
-        )
+        .env("ACHOST_NET_LOG", &config.network_watchdog_log)
+        .env("ACHOST_NET_PID", &config.network_watchdog_pid)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1094,12 +1208,19 @@ fn run_stop() -> i32 {
     }
 
     let config = DockerStopConfig::from_env();
-    stop_pid_file("dockerd", &config.dockerd_pid);
-    stop_pid_file("dockerd-launch", &config.dockerd_launch_pid);
-    stop_pid_file("containerd", &config.containerd_pid);
-    stop_named_processes("dockerd");
-    stop_named_processes("containerd");
-    stop_pid_file("achost-supervise", &config.supervisor_pid);
+    let dockerd = config.achost_bin.join("dockerd");
+    let containerd = config.achost_bin.join("containerd");
+    stop_network_watchdog(&config);
+    stop_pid_file("dockerd", &config.dockerd_pid, &dockerd);
+    stop_pid_file("dockerd-launch", &config.dockerd_launch_pid, &dockerd);
+    stop_pid_file("containerd", &config.containerd_pid, &containerd);
+    stop_owned_processes("dockerd", &dockerd);
+    stop_owned_processes("containerd", &containerd);
+    stop_pid_file(
+        "achost-supervise",
+        &config.supervisor_pid,
+        &config.supervise,
+    );
     remove_file_quiet(&config.supervisor_socket);
     unmount_chroot(&config);
     unmount_devices_cgroup();
@@ -1110,6 +1231,7 @@ fn run_stop() -> i32 {
         remove_file_quiet(path);
     }
     remove_file_quiet(&config.containerd_address);
+    report_stop_state(&config);
     0
 }
 
@@ -1187,7 +1309,7 @@ fn remove_iptables_rule(iptables: &str, table: &str, chain: &str, args: &[&str])
     }
 }
 
-fn stop_pid_file(name: &str, pid_file: &Path) {
+fn stop_pid_file(name: &str, pid_file: &Path, expected_executable: &Path) {
     if !pid_file.is_file() {
         println!("{name} pid file missing: {}", pid_file.display());
         return;
@@ -1206,6 +1328,15 @@ fn stop_pid_file(name: &str, pid_file: &Path) {
         return;
     }
 
+    if !process_uses_executable(pid, expected_executable) {
+        println!(
+            "{name} pid={pid} not achost-owned expected={}; skipping signal",
+            expected_executable.display()
+        );
+        remove_file_quiet(pid_file);
+        return;
+    }
+
     signal_pid(pid, libc::SIGTERM);
     for _ in 0..10 {
         if !pid_alive(pid) {
@@ -1220,29 +1351,46 @@ fn stop_pid_file(name: &str, pid_file: &Path) {
     println!("{name} stopped pid={pid}");
 }
 
-fn stop_named_processes(name: &str) {
-    let pids = pids_for_name(name);
+fn stop_network_watchdog(config: &DockerStopConfig) {
+    let runtime_core = config.common_bin.join("achost-runtime-core");
+    stop_pid_file(
+        "network-watchdog",
+        &config.network_watchdog_pid,
+        &runtime_core,
+    );
+    stop_owned_processes_with_arg("network-watchdog", &runtime_core, "net-watchdog");
+}
+
+fn stop_owned_processes(name: &str, expected_executable: &Path) {
+    let pids = pids_for_executable(name, expected_executable);
+    stop_pid_list(name, &pids);
+}
+
+fn stop_owned_processes_with_arg(name: &str, expected_executable: &Path, arg: &str) {
+    let pids = pids_for_executable_with_arg(expected_executable, arg);
+    stop_pid_list(name, &pids);
+}
+
+fn stop_pid_list(name: &str, pids: &[u32]) {
     if pids.is_empty() {
         return;
     }
-    for pid in &pids {
+    for pid in pids {
         signal_pid(*pid, libc::SIGTERM);
     }
     thread::sleep(Duration::from_secs(1));
-    for pid in &pids {
+    for pid in pids {
         if pid_alive(*pid) {
             signal_pid(*pid, libc::SIGKILL);
         }
     }
-    let joined = pids
-        .iter()
-        .map(u32::to_string)
-        .collect::<Vec<_>>()
-        .join(" ");
-    println!("{name} stopped leftover pids={joined}");
+    println!(
+        "{name} stopped achost-owned leftover pids={}",
+        join_pids(pids)
+    );
 }
 
-fn pids_for_name(name: &str) -> Vec<u32> {
+fn pids_for_executable(name: &str, expected_executable: &Path) -> Vec<u32> {
     let Ok(entries) = fs::read_dir("/proc") else {
         return Vec::new();
     };
@@ -1252,12 +1400,98 @@ fn pids_for_name(name: &str) -> Vec<u32> {
         let Some(pid) = file_name.to_string_lossy().parse::<u32>().ok() else {
             continue;
         };
-        if read_trimmed(&entry.path().join("comm")).as_deref() == Some(name) {
+        if read_trimmed(&entry.path().join("comm")).as_deref() != Some(name) {
+            continue;
+        }
+        if process_uses_executable(pid, expected_executable) {
             pids.push(pid);
         }
     }
     pids.sort_unstable();
     pids
+}
+
+fn pids_for_executable_with_arg(expected_executable: &Path, arg: &str) -> Vec<u32> {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut pids = Vec::new();
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(pid) = file_name.to_string_lossy().parse::<u32>().ok() else {
+            continue;
+        };
+        if process_uses_executable(pid, expected_executable) && process_has_arg(pid, arg) {
+            pids.push(pid);
+        }
+    }
+    pids.sort_unstable();
+    pids
+}
+
+fn process_uses_executable(pid: u32, expected_executable: &Path) -> bool {
+    let proc_dir = PathBuf::from(format!("/proc/{pid}"));
+    if fs::read_link(proc_dir.join("exe")).is_ok_and(|path| path == expected_executable) {
+        return true;
+    }
+    read_cmdline_args(pid)
+        .first()
+        .is_some_and(|arg0| Path::new(arg0) == expected_executable)
+}
+
+fn process_has_arg(pid: u32, expected_arg: &str) -> bool {
+    read_cmdline_args(pid)
+        .iter()
+        .skip(1)
+        .any(|arg| arg == expected_arg)
+}
+
+fn read_cmdline_args(pid: u32) -> Vec<String> {
+    let Ok(cmdline) = fs::read(format!("/proc/{pid}/cmdline")) else {
+        return Vec::new();
+    };
+    cmdline
+        .split(|byte| *byte == 0)
+        .filter(|arg| !arg.is_empty())
+        .filter_map(|arg| std::str::from_utf8(arg).ok().map(str::to_string))
+        .collect()
+}
+
+fn report_stop_state(config: &DockerStopConfig) {
+    let dockerd = pids_for_executable("dockerd", &config.achost_bin.join("dockerd"));
+    let containerd = pids_for_executable("containerd", &config.achost_bin.join("containerd"));
+    let watchdog = pids_for_executable_with_arg(
+        &config.common_bin.join("achost-runtime-core"),
+        "net-watchdog",
+    );
+    println!("remaining_dockerd_pids={}", join_pids(&dockerd));
+    println!("remaining_containerd_pids={}", join_pids(&containerd));
+    println!("remaining_network_watchdog_pids={}", join_pids(&watchdog));
+    print_runtime_path_state("docker_socket", config.docker_socket.as_deref());
+    print_runtime_path_state("compat_socket", config.compat_socket.as_deref());
+    print_runtime_path_state("containerd_socket", Some(&config.containerd_address));
+    print_runtime_path_state("supervisor_socket", Some(&config.supervisor_socket));
+    print_runtime_path_state("network_watchdog_pid", Some(&config.network_watchdog_pid));
+    print_runtime_path_state("network_watchdog_log", Some(&config.network_watchdog_log));
+}
+
+fn print_runtime_path_state(label: &str, path: Option<&Path>) {
+    let Some(path) = path else {
+        println!("{label}=unset");
+        return;
+    };
+    println!(
+        "{label}={} path={}",
+        if path.exists() { "present" } else { "missing" },
+        path.display()
+    );
+}
+
+fn join_pids(pids: &[u32]) -> String {
+    pids.iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn unmount_chroot(config: &DockerStopConfig) {

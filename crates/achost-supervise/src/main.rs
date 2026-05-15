@@ -536,7 +536,6 @@ fn setup_native_root(native_root: &str) -> io::Result<()> {
     )?;
     for (path, required) in [
         ("/data", true),
-        ("/dev", true),
         ("/proc", true),
         ("/sys", true),
         ("/system", true),
@@ -548,7 +547,6 @@ fn setup_native_root(native_root: &str) -> io::Result<()> {
         ("/storage", false),
         ("/metadata", false),
         ("/linkerconfig", false),
-        ("/acct", false),
         ("/config", false),
         ("/debug_ramdisk", false),
         ("/second_stage_resources", false),
@@ -557,6 +555,10 @@ fn setup_native_root(native_root: &str) -> io::Result<()> {
         bind_native_path(native_root, path, required)?;
     }
     setup_native_cgroups(native_root)?;
+    // Keep Android cgroup mounts after the private tree so containerd selects /sys/fs/cgroup.
+    for (path, required) in [("/dev", true), ("/acct", false)] {
+        bind_native_path(native_root, path, required)?;
+    }
     setup_native_run(native_root)?;
     eprintln!(
         "achost-supervise: native root={} private-run=ready private-cgroup=ready",

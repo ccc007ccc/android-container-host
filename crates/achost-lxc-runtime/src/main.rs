@@ -10,7 +10,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const REQUIRED_BINARIES: &[&str] = &[
     "lxc-start",
@@ -1706,8 +1707,39 @@ fn lxc_info(config: &LxcConfig, name: &str) -> Result<LxcInfo, String> {
     Ok(LxcInfo { state, pid })
 }
 
+fn wait_for_lxc_state(
+    config: &LxcConfig,
+    name: &str,
+    expected: &str,
+    timeout_secs: u64,
+) -> Result<LxcInfo, String> {
+    let mut last = "UNKNOWN".to_string();
+    for _ in 0..timeout_secs {
+        match lxc_info(config, name) {
+            Ok(info) if info.state == expected => return Ok(info),
+            Ok(info) => last = format!("{} pid={}", info.state, info.pid.unwrap_or_default()),
+            Err(error) => last = error,
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    Err(format!(
+        "container {name} did not reach {expected}; last_status={last}"
+    ))
+}
+
+fn lxc_state_label(config: &LxcConfig, name: &str) -> String {
+    match lxc_info(config, name) {
+        Ok(info) => format!("{} pid={}", info.state, info.pid.unwrap_or_default()),
+        Err(error) => format!("UNKNOWN error={error}"),
+    }
+}
+
 fn start_container(config: &LxcConfig, name: &str) -> Result<(), String> {
     validate_existing_container(config, name)?;
+    if lxc_info(config, name).is_ok_and(|info| info.state == "RUNNING") {
+        println!("container_state=RUNNING");
+        return Ok(());
+    }
     if run_prepare_bridge() != 0 {
         return Err("prepare-bridge failed".to_string());
     }
@@ -1731,15 +1763,35 @@ fn start_container(config: &LxcConfig, name: &str) -> Result<(), String> {
             "INFO",
         ],
     )?;
-    if result.ok {
-        Ok(())
-    } else {
-        Err(result.output)
+    if !result.ok {
+        return Err(format!(
+            "{}; log={}; try: achost-lxc-runtime logs {}",
+            result.output,
+            log.display(),
+            name
+        ));
     }
+    let info = wait_for_lxc_state(config, name, "RUNNING", 20).map_err(|error| {
+        format!(
+            "{error}; log={}; try: achost-lxc-runtime logs {}",
+            log.display(),
+            name
+        )
+    })?;
+    println!(
+        "container_state={} pid={}",
+        info.state,
+        info.pid.unwrap_or_default()
+    );
+    Ok(())
 }
 
 fn stop_container(config: &LxcConfig, name: &str, force: bool) -> Result<(), String> {
     validate_existing_container(config, name)?;
+    if lxc_info(config, name).is_ok_and(|info| info.state == "STOPPED") {
+        println!("container_state=STOPPED");
+        return Ok(());
+    }
     let containers = path_str(&config.lxc_containers)?;
     let args = if force {
         vec!["-P", containers, "-n", name, "-k"]
@@ -1747,11 +1799,23 @@ fn stop_container(config: &LxcConfig, name: &str, force: bool) -> Result<(), Str
         vec!["-P", containers, "-n", name, "-t", "5"]
     };
     let result = run_lxc_capture(config, "lxc-stop", &args)?;
-    if result.ok {
-        Ok(())
-    } else {
-        Err(result.output)
+    let log = config.container_log(name);
+    if !result.ok {
+        if lxc_info(config, name).is_ok_and(|info| info.state == "STOPPED") {
+            println!("container_state=STOPPED");
+            return Ok(());
+        }
+        return Err(format!(
+            "{}; state={}; log={}",
+            result.output,
+            lxc_state_label(config, name),
+            log.display()
+        ));
     }
+    let info = wait_for_lxc_state(config, name, "STOPPED", if force { 10 } else { 15 })
+        .map_err(|error| format!("{error}; log={}", log.display()))?;
+    println!("container_state={}", info.state);
+    Ok(())
 }
 
 fn destroy_container(config: &LxcConfig, name: &str) -> Result<(), String> {
